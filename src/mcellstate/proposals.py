@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Literal
+import time
+from typing import Callable, Literal
 
 import numpy as np
 
@@ -153,11 +154,22 @@ class ProposalSampler:
         self._signature_weights: dict[int, np.ndarray] = {}
         self._merge_neighbors: dict[int, np.ndarray] = {}
         self._merge_neighbor_weights: dict[int, np.ndarray] = {}
+        self._merge_neighbor_sources = np.empty(0, dtype=np.int64)
         self._deterministic_merge_pairs: list[tuple[int, int]] = []
+        self._non_singleton_probs = np.empty(0, dtype=np.float64)
+        self._candidate_clusters_cache: dict[int, np.ndarray] = {}
         self._psi: np.ndarray | None = None
+        self._trace: Callable[[str], None] | None = None
 
     def set_scoring_context(self, psi: np.ndarray | None) -> None:
         self._psi = None if psi is None else np.asarray(psi, dtype=np.float64)
+
+    def set_trace(self, callback: Callable[[str], None] | None) -> None:
+        self._trace = callback
+
+    def _emit_trace(self, message: str) -> None:
+        if self._trace is not None:
+            self._trace(message)
 
     def set_family_weights(self, **weights: float) -> None:
         updated = []
@@ -181,16 +193,38 @@ class ProposalSampler:
     def prepare_round(self, state: PartitionState) -> None:
         if self._prepared_version == state.version:
             return
+        start = time.perf_counter()
+        self._emit_trace("sampler prepare_round start")
         self._active_clusters = state.active_cluster_array()
         self._non_singletons = np.asarray(sorted(state.non_singleton_cluster_ids()), dtype=np.int64)
+        if self._non_singletons.size:
+            sizes = np.asarray([state.cluster_size(cluster_id) for cluster_id in self._non_singletons], dtype=np.float64)
+            total = float(sizes.sum())
+            self._non_singleton_probs = sizes / total if total > 0.0 else np.full_like(sizes, 1.0 / float(len(sizes)))
+        else:
+            self._non_singleton_probs = np.empty(0, dtype=np.float64)
+        self._candidate_clusters_cache = {}
         self._idf_weights = np.log(
             (len(self._active_clusters) + 1.0) / (state.gene_cluster_counts.astype(np.float64) + 1.0),
         )
+        t1 = time.perf_counter()
         self._refresh_signature_pools(state)
+        t2 = time.perf_counter()
         self._refresh_current_signatures(state)
+        t3 = time.perf_counter()
         self._rebuild_merge_neighbors(state)
+        t4 = time.perf_counter()
         self._prepared_version = state.version
         self._pending_signature_refresh.clear()
+        self._emit_trace(
+            "sampler prepare_round done "
+            f"total_s={t4 - start:.3f} "
+            f"base_s={t1 - start:.3f} "
+            f"signature_pool_s={t2 - t1:.3f} "
+            f"signature_current_s={t3 - t2:.3f} "
+            f"merge_neighbors_s={t4 - t3:.3f} "
+            f"active={self._active_clusters.size} non_singletons={self._non_singletons.size}",
+        )
 
     def _refresh_signature_pools(self, state: PartitionState) -> None:
         active_set = set(int(cluster_id) for cluster_id in self._active_clusters.tolist())
@@ -281,23 +315,34 @@ class ProposalSampler:
         ordered_pairs = sorted(pair_scores.items(), key=lambda item: item[1], reverse=True)
         self._merge_neighbors = merge_neighbors
         self._merge_neighbor_weights = merge_neighbor_weights
+        self._merge_neighbor_sources = np.asarray(sorted(merge_neighbors), dtype=np.int64) if merge_neighbors else np.empty(0, dtype=np.int64)
         self._deterministic_merge_pairs = [pair for pair, _ in ordered_pairs]
 
     def _candidate_clusters_for_gene(self, state: PartitionState, gene: int) -> np.ndarray:
+        cached = self._candidate_clusters_cache.get(int(gene))
+        if cached is not None:
+            return cached
         clusters = state.gene_to_clusters.get(int(gene))
         if not clusters:
-            return np.empty(0, dtype=np.int64)
+            result = np.empty(0, dtype=np.int64)
+            self._candidate_clusters_cache[int(gene)] = result
+            return result
         cluster_ids = np.asarray(sorted(int(cluster_id) for cluster_id in clusters), dtype=np.int64)
         if cluster_ids.size <= self.merge_gene_cluster_cap:
+            self._candidate_clusters_cache[int(gene)] = cluster_ids
             return cluster_ids
         counts = np.asarray([state.clusters[int(cluster_id)].get(int(gene)) for cluster_id in cluster_ids], dtype=np.int64)
         order = np.argsort(counts)[::-1][: self.merge_gene_cluster_cap]
-        return np.asarray(cluster_ids[order], dtype=np.int64)
+        result = np.asarray(cluster_ids[order], dtype=np.int64)
+        self._candidate_clusters_cache[int(gene)] = result
+        return result
 
     def sample_batch(self, state: PartitionState, n_proposals: int) -> list[Proposal]:
         if n_proposals <= 0:
             return []
+        start = time.perf_counter()
         self.prepare_round(state)
+        after_prepare = time.perf_counter()
         family_counts = self.rng.multinomial(int(n_proposals), self.family_weights)
         proposals: list[Proposal] = []
 
@@ -306,12 +351,26 @@ class ProposalSampler:
             int(round(int(family_counts[0]) * self.deterministic_merge_ratio)),
         )
         proposals.extend(self._deterministic_merge_proposals(deterministic_budget))
+        self._emit_trace(
+            "sampler sample_batch start "
+            f"prepare_s={after_prepare - start:.3f} "
+            f"merge={int(family_counts[0])} peel={int(family_counts[1])} move={int(family_counts[2])} "
+            f"block_peel={int(family_counts[3])} block_move={int(family_counts[4])} "
+            f"deterministic_merge={deterministic_budget}",
+        )
 
         for family_idx, family_name in enumerate(self.family_names):
             count = int(family_counts[family_idx])
             if family_name == "merge":
                 count = max(0, count - deterministic_budget)
-            proposals.extend(self._sample_family(state, family_name, count))
+            family_start = time.perf_counter()
+            family_props = self._sample_family(state, family_name, count)
+            proposals.extend(family_props)
+            family_end = time.perf_counter()
+            self._emit_trace(
+                f"sampler family={family_name} requested={count} produced={len(family_props)} time_s={family_end - family_start:.3f}",
+            )
+        self._emit_trace(f"sampler sample_batch done total_props={len(proposals)} total_s={time.perf_counter() - start:.3f}")
         return proposals
 
     def _deterministic_merge_proposals(self, budget: int) -> list[MergeProposal]:
@@ -400,7 +459,7 @@ class ProposalSampler:
     def _sample_merge_biased(self, state: PartitionState) -> MergeProposal | None:
         if not self._merge_neighbors:
             return self._sample_merge_uniform(state)
-        source_cluster = int(self.rng.choice(np.asarray(list(self._merge_neighbors), dtype=np.int64)))
+        source_cluster = int(self.rng.choice(self._merge_neighbor_sources))
         neighbors = self._merge_neighbors.get(source_cluster)
         if neighbors is None or neighbors.size == 0:
             return self._sample_merge_uniform(state)
@@ -410,11 +469,10 @@ class ProposalSampler:
         return MergeProposal(cluster_a=cluster_a, cluster_b=cluster_b)
 
     def _sample_non_singleton_cluster(self, state: PartitionState) -> int | None:
+        del state
         if self._non_singletons.size == 0:
             return None
-        sizes = np.asarray([state.cluster_size(cluster_id) for cluster_id in self._non_singletons], dtype=np.float64)
-        probs = sizes / sizes.sum()
-        return int(self.rng.choice(self._non_singletons, p=probs))
+        return int(self.rng.choice(self._non_singletons, p=self._non_singleton_probs))
 
     def _sample_non_singleton_cell(self, state: PartitionState) -> tuple[int, int] | None:
         cluster_id = self._sample_non_singleton_cluster(state)

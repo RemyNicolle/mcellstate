@@ -197,6 +197,11 @@ class Optimizer:
             psi = self.psi.copy()
             state.initialize_likelihood_cache(psi)
             self.sampler.notify_state_changed(state, set(state.active_cluster_ids))
+            self.sampler.set_trace(
+                (lambda message, restart=restart, stream=verbose_stream: self._emit_sampler_trace(stream=stream, restart=restart, message=message))
+                if verbose
+                else None
+            )
             backend = make_backend(self.backend_name, psi, state, num_threads=self.backend_threads)
             history: list[dict] = []
             current_ll = state.total_log_likelihood_cached(psi)
@@ -525,6 +530,18 @@ class Optimizer:
 
         out = stream or sys.stdout
         print(f"[trace] restart={restart} round={round_idx} stage={stage} {message}", file=out, flush=True)
+
+    def _emit_sampler_trace(
+        self,
+        *,
+        stream: TextIO | None,
+        restart: int,
+        message: str,
+    ) -> None:
+        import sys
+
+        out = stream or sys.stdout
+        print(f"[trace] restart={restart} sampler {message}", file=out, flush=True)
 
     def _cuda_memory_report(self) -> tuple[float, float] | None:
         try:
