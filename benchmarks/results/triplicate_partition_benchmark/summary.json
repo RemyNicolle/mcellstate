@@ -1,0 +1,144 @@
+{
+  "cellstates_repo": "/Users/remy.nicolle/Workspace/DEV/cellstates",
+  "dataset": {
+    "n_cells": 2298,
+    "n_genes_expressed": 18871,
+    "nnz": 5063404,
+    "total_umis": 10413999,
+    "truth_clusters": 10
+  },
+  "alpha": 4096.0,
+  "cellstates_timeout_s": 1800.0,
+  "reference_partition": {
+    "n_clusters": 10,
+    "ari_vs_truth": 1.0,
+    "fms_vs_truth": 1.0,
+    "log_likelihood_under_fixed_psi": -81458341.6265226,
+    "labels_path": "/Users/remy.nicolle/Workspace/DEV/cellstates/test/results/optimized_clusters.txt"
+  },
+  "runs": [
+    {
+      "method": "cellstates_1core",
+      "seed": 1,
+      "status": "timeout",
+      "elapsed_s": 1800.008044290822,
+      "ari_vs_truth": null,
+      "fms_vs_truth": null,
+      "n_clusters": null,
+      "log_likelihood": null,
+      "labels_path": null
+    },
+    {
+      "method": "cellstates_6core",
+      "seed": 1,
+      "status": "timeout",
+      "elapsed_s": 1800.0017158337869,
+      "ari_vs_truth": null,
+      "fms_vs_truth": null,
+      "n_clusters": null,
+      "log_likelihood": null,
+      "labels_path": null
+    },
+    {
+      "method": "mcellstate",
+      "seed": 1,
+      "status": "completed",
+      "elapsed_s": 189.43052629102021,
+      "ari_vs_truth": 0.9811421746094137,
+      "fms_vs_truth": 0.9851370067829847,
+      "n_clusters": 9,
+      "log_likelihood": -81457510.71362095,
+      "labels_path": "/Users/remy.nicolle/Workspace/DEV/mcellstate/benchmark_results/triplicate_partition_benchmark/mcellstate_seed1_labels.npy",
+      "timing_s": {
+        "cluster_reassign_s": 5.584210157394409e-06,
+        "commit_s": 7.501803338527679e-07,
+        "configure_s": 7.020821794867516e-05,
+        "conflict_s": 0.0003235430922359228,
+        "exact_cell_reassign_s": 40.57360008195974,
+        "full_merge_s": 77.81968933413737,
+        "greedy_merge_s": 0.10663524991832674,
+        "perturbation_s": 3.416789695620537e-06,
+        "proposal_s": 57.65038179210387,
+        "scoring_s": 12.958263874985278,
+        "serial_refine_s": 4.083849489688873e-06,
+        "tau_update_s": 0.0
+      }
+    },
+    {
+      "method": "mcellstate",
+      "seed": 2,
+      "status": "completed",
+      "elapsed_s": 190.27916308306158,
+      "ari_vs_truth": 0.9811421746094137,
+      "fms_vs_truth": 0.9851370067829847,
+      "n_clusters": 9,
+      "log_likelihood": -81457510.71362095,
+      "labels_path": "/Users/remy.nicolle/Workspace/DEV/mcellstate/benchmark_results/triplicate_partition_benchmark/mcellstate_seed2_labels.npy",
+      "timing_s": {
+        "cluster_reassign_s": 4.916917532682419e-06,
+        "commit_s": 7.499475032091141e-07,
+        "configure_s": 5.887611769139767e-05,
+        "conflict_s": 0.0003071250393986702,
+        "exact_cell_reassign_s": 39.16885674977675,
+        "full_merge_s": 78.80584216606803,
+        "greedy_merge_s": 0.10666824993677437,
+        "perturbation_s": 3.5420525819063187e-06,
+        "proposal_s": 59.13700512610376,
+        "scoring_s": 12.737472998909652,
+        "serial_refine_s": 4.458241164684296e-06,
+        "tau_update_s": 0.0
+      }
+    },
+    {
+      "method": "mcellstate",
+      "seed": 3,
+      "status": "completed",
+      "elapsed_s": 187.18568745907396,
+      "ari_vs_truth": 0.9811421746094137,
+      "fms_vs_truth": 0.9851370067829847,
+      "n_clusters": 9,
+      "log_likelihood": -81457510.71362095,
+      "labels_path": "/Users/remy.nicolle/Workspace/DEV/mcellstate/benchmark_results/triplicate_partition_benchmark/mcellstate_seed3_labels.npy",
+      "timing_s": {
+        "cluster_reassign_s": 5.666166543960571e-06,
+        "commit_s": 7.092021405696869e-07,
+        "configure_s": 5.333404988050461e-05,
+        "conflict_s": 0.00031670904718339443,
+        "exact_cell_reassign_s": 41.97789595788345,
+        "full_merge_s": 73.5391514999792,
+        "greedy_merge_s": 0.10756108327768743,
+        "perturbation_s": 3.248918801546097e-06,
+        "proposal_s": 58.43741683405824,
+        "scoring_s": 12.795058166841045,
+        "serial_refine_s": 4.167202860116959e-06,
+        "tau_update_s": 0.0
+      }
+    }
+  ],
+  "method_summaries": [
+    {
+      "method": "cellstates_1core",
+      "n_runs": 0,
+      "mean_elapsed_s": null,
+      "mean_ari_vs_truth": null,
+      "mean_n_clusters": null,
+      "mean_log_likelihood": null
+    },
+    {
+      "method": "cellstates_6core",
+      "n_runs": 0,
+      "mean_elapsed_s": null,
+      "mean_ari_vs_truth": null,
+      "mean_n_clusters": null,
+      "mean_log_likelihood": null
+    },
+    {
+      "method": "mcellstate",
+      "n_runs": 3,
+      "mean_elapsed_s": 188.96512561105192,
+      "mean_ari_vs_truth": 0.9811421746094137,
+      "mean_n_clusters": 9.0,
+      "mean_log_likelihood": -81457510.71362095
+    }
+  ]
+}

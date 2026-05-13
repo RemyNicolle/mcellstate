@@ -1,0 +1,39 @@
+{
+  "dataset": "cellstates bundled simulated dataset",
+  "date": "2026-05-07",
+  "mcellstate_search_upgrade": {
+    "status": "completed",
+    "backend": "torch-cpu",
+    "backend_threads": 6,
+    "max_rounds": 2,
+    "n_proposals": 5000,
+    "pi_merge": 0.45,
+    "pi_peel": 0.08,
+    "pi_move": 0.17,
+    "pi_block_peel": 0.15,
+    "pi_block_move": 0.15,
+    "top_merge_neighbors": 8,
+    "deterministic_merge_ratio": 0.25,
+    "merge_gene_cluster_cap": 24,
+    "serial_refine_passes": 1,
+    "elapsed_s": 61.92761058383621,
+    "n_clusters": 2107,
+    "ari_vs_truth": 0.0008958743308543092,
+    "fms_vs_truth": 0.022993205191961096,
+    "ari_vs_reference": 0.0008958743308543092,
+    "fms_vs_reference": 0.022993205191961096,
+    "log_likelihood": -83379705.34575067
+  },
+  "prior_mcellstate_baseline": {
+    "source": "/Users/remy.nicolle/Workspace/DEV/mcellstate/benchmark_results/cellstates_comparison/summary.json",
+    "elapsed_s": 36.32359266607091,
+    "n_clusters": 1818,
+    "ari_vs_truth": 0.003868864181048911,
+    "fms_vs_truth": 0.04564318595222079,
+    "log_likelihood": -83288215.37869436
+  },
+  "reference_partition": {
+    "n_clusters": 10,
+    "log_likelihood_under_fixed_psi": -81458341.6265226
+  }
+}

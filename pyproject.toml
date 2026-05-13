@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcellstate"
+version = "0.1.0"
+description = "Collapsed Dirichlet-multinomial partitioning and doublet auditing for sparse scRNA-seq UMI counts"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "networkx",
+  "numpy",
+  "pandas",
+  "scipy",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+]
+
+[project.scripts]
+mcellstate = "mcellstate.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["mcellstate", "mcellstate.*", "mcellstate_doublet", "mcellstate_doublet.*"]
+exclude = ["tests", "tests.*", "examples", "examples.*", "benchmarks", "benchmarks.*", "reference", "reference.*"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

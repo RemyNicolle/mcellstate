@@ -1,0 +1,83 @@
+Metadata-Version: 2.4
+Name: dm_partition_opt
+Version: 0.1.0
+Summary: Collapsed Dirichlet-multinomial hard partition optimizer for sparse scRNA-seq UMI counts
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: networkx
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: scipy
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+
+# dm_partition_opt
+
+Collapsed Dirichlet-multinomial hard partition optimization for sparse scRNA-seq UMI counts.
+
+## Install
+
+```bash
+pip install git+https://github.com/<owner>/<repo>.git
+```
+
+For local development:
+
+```bash
+pip install -e ".[dev]"
+```
+
+## Run
+
+The package installs a `mcellstate` command and also supports `python -m dm_partition_opt`.
+
+```bash
+mcellstate fit \
+  --input benchmark_data/simulated_cells_x_genes.npz \
+  --output labels.npy
+```
+
+By default the CLI:
+
+- uses a very overclustered Leiden warm start
+- runs until convergence
+- chooses the prior concentration from the data if `--tau` is omitted
+- uses `backend=auto`, which prefers CUDA, then MPS, then torch CPU when available
+
+Useful overrides:
+
+```bash
+mcellstate fit --help
+```
+
+For the bundled cellstates simulation comparison, see `scripts/compare_cellstates_simulation.py`.
+
+## Post-partition doublet audit
+
+The `dm_doublet_audit` package annotates existing hard partitions without changing
+cluster assignments. It compares each target cluster against a genuine
+single-state collapsed Dirichlet-multinomial explanation and convex mixtures of
+two parent cluster states. It uses raw UMI count likelihoods plus a weak,
+configurable abundance prior; it does not use embeddings, marker heuristics, or
+QC thresholds as evidence.
+
+```python
+from dm_doublet_audit import audit_doublets, make_prior
+
+psi = make_prior(X, tau=1.0, mode="global_frequency")
+res = audit_doublets(
+    X,
+    z,
+    psi=psi,
+    doublet_rate=0.05,
+    top_m_parents=50,
+    lambda_grid_size=101,
+    beta_lambda=(2, 2),
+)
+df = res.cluster_table
+```
+
+Calls are conservative by default. Inspect `expr_logBF_doublet_vs_self`,
+`expr_gain_vs_best_parent`, `abundance_logBF`, `total_log_odds`, and
+`total_log_odds_minus_search_penalty` to distinguish expression-driven evidence
+from abundance-driven evidence.

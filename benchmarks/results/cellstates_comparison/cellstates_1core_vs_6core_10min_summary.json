@@ -1,0 +1,27 @@
+{
+  "dataset": {
+    "n_cells": 2298,
+    "n_genes_expressed": 18871,
+    "nnz": 5063404,
+    "total_umis": 10413999,
+    "truth_clusters": 10
+  },
+  "alpha": 4096.0,
+  "timeout_s": 600.0,
+  "runs": [
+    {
+      "status": "timeout",
+      "threads": 1,
+      "wall_s": 600.0110692500602,
+      "timeout_s": 600.0,
+      "result_json": "/Users/remy.nicolle/Workspace/DEV/mcellstate/benchmark_results/cellstates_comparison/cellstates_1core_10min.json"
+    },
+    {
+      "status": "timeout",
+      "threads": 6,
+      "wall_s": 600.0035046250559,
+      "timeout_s": 600.0,
+      "result_json": "/Users/remy.nicolle/Workspace/DEV/mcellstate/benchmark_results/cellstates_comparison/cellstates_6core_10min.json"
+    }
+  ]
+}

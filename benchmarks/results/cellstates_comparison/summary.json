@@ -1,0 +1,2707 @@
+{
+  "dataset": {
+    "n_cells": 2298,
+    "n_genes_expressed": 18871,
+    "nnz": 5063404,
+    "total_umis": 10413999,
+    "truth_clusters": 10
+  },
+  "alpha": 4096.0,
+  "original_reference": {
+    "n_clusters": 10,
+    "ari_vs_truth": 1.0,
+    "fms_vs_truth": 1.0,
+    "log_likelihood_under_fixed_psi": -81458341.6265226,
+    "labels_path": "/Users/remy.nicolle/Workspace/DEV/cellstates/test/results/optimized_clusters.txt"
+  },
+  "original_runtime": {
+    "status": "timeout",
+    "wall_s": 120.0395405839663,
+    "timeout_s": 120.0
+  },
+  "mcellstate": {
+    "status": "completed",
+    "elapsed_s": 187.40447112498805,
+    "n_clusters": 9,
+    "ari_vs_truth": 0.9811421746094137,
+    "fms_vs_truth": 0.9851370067829847,
+    "ari_vs_reference": 0.9811421746094137,
+    "fms_vs_reference": 0.9851370067829847,
+    "log_likelihood": -81457510.71362095,
+    "reference_log_likelihood_under_same_psi": -81458341.6265226,
+    "labels_path": "/Users/remy.nicolle/Workspace/DEV/mcellstate/benchmark_results/cellstates_comparison/mcellstate_labels.npy",
+    "history": [
+      {
+        "restart": 0,
+        "round": 0,
+        "stage": "coarsen",
+        "family_weights": {
+          "merge": 0.94,
+          "peel": 0.02,
+          "move": 0.03,
+          "block_peel": 0.005,
+          "block_move": 0.005
+        },
+        "n_proposals": 4000,
+        "n_positive": 0,
+        "n_accepted": 0,
+        "full_merge": {
+          "n_steps": 385,
+          "n_sweeps": 32,
+          "delta": 635301.7007794625,
+          "operations": [
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 135,
+              "delta": 19505.699142539408
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 172,
+              "delta": 13902.654590887367
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 285,
+              "cluster_b": 296,
+              "delta": 12700.337980569457
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 251,
+              "cluster_b": 252,
+              "delta": 10346.672214081045
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 384,
+              "cluster_b": 385,
+              "delta": 8753.88020298438
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 287,
+              "cluster_b": 295,
+              "delta": 7274.820620549377
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 174,
+              "cluster_b": 179,
+              "delta": 5957.347016973072
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 22,
+              "cluster_b": 69,
+              "delta": 5368.876664461568
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 136,
+              "cluster_b": 143,
+              "delta": 4153.417816872185
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 183,
+              "cluster_b": 188,
+              "delta": 3844.193575502315
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 292,
+              "cluster_b": 304,
+              "delta": 3421.1727675086586
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 23,
+              "cluster_b": 26,
+              "delta": 2705.234455229045
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 14,
+              "cluster_b": 15,
+              "delta": 2596.0878051601176
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 253,
+              "cluster_b": 256,
+              "delta": 2583.9965826379776
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 27,
+              "cluster_b": 30,
+              "delta": 2417.569494979951
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 220,
+              "cluster_b": 228,
+              "delta": 2298.065032058934
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 0,
+              "cluster_b": 5,
+              "delta": 2198.9515673156056
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 288,
+              "cluster_b": 298,
+              "delta": 2004.4817691300414
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 31,
+              "cluster_b": 32,
+              "delta": 1795.5007642060518
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 82,
+              "cluster_b": 87,
+              "delta": 1530.3853182690218
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 173,
+              "cluster_b": 182,
+              "delta": 1460.1980720796564
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 258,
+              "cluster_b": 265,
+              "delta": 1452.276447136639
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 77,
+              "cluster_b": 89,
+              "delta": 1096.2888763288502
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 289,
+              "cluster_b": 302,
+              "delta": 1048.6659831553989
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 29,
+              "cluster_b": 39,
+              "delta": 901.9124389276549
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 293,
+              "cluster_b": 301,
+              "delta": 870.849847317193
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 255,
+              "cluster_b": 264,
+              "delta": 732.365457626991
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 322,
+              "cluster_b": 354,
+              "delta": 730.3237744096696
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 16,
+              "cluster_b": 20,
+              "delta": 686.818004094439
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 81,
+              "cluster_b": 106,
+              "delta": 649.1309824266355
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 34,
+              "cluster_b": 36,
+              "delta": 631.3626467865397
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 141,
+              "cluster_b": 144,
+              "delta": 598.96958746374
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 266,
+              "cluster_b": 274,
+              "delta": 586.8410432232486
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 286,
+              "cluster_b": 323,
+              "delta": 565.6984064977878
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 17,
+              "cluster_b": 18,
+              "delta": 529.1459161258299
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 40,
+              "cluster_b": 52,
+              "delta": 484.2034927681743
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 70,
+              "cluster_b": 74,
+              "delta": 475.85552849806845
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 80,
+              "cluster_b": 86,
+              "delta": 467.2449278563872
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 259,
+              "cluster_b": 275,
+              "delta": 460.5575549278801
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 19,
+              "cluster_b": 21,
+              "delta": 449.95446673468723
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 294,
+              "cluster_b": 320,
+              "delta": 435.75064364637365
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 175,
+              "cluster_b": 180,
+              "delta": 414.170743105351
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 25,
+              "cluster_b": 46,
+              "delta": 397.2408328403544
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 134,
+              "cluster_b": 137,
+              "delta": 340.8398777166876
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 44,
+              "cluster_b": 54,
+              "delta": 330.7994665076658
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 76,
+              "cluster_b": 91,
+              "delta": 317.78825459039945
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 24,
+              "cluster_b": 48,
+              "delta": 316.0686046878873
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 101,
+              "cluster_b": 113,
+              "delta": 311.9048914757441
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 290,
+              "cluster_b": 303,
+              "delta": 304.9607279959455
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 37,
+              "cluster_b": 43,
+              "delta": 302.9306042778044
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 42,
+              "cluster_b": 47,
+              "delta": 288.00165808988095
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 263,
+              "cluster_b": 276,
+              "delta": 283.8019264436771
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 28,
+              "cluster_b": 55,
+              "delta": 280.49368741934813
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 92,
+              "cluster_b": 99,
+              "delta": 277.05837387139036
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 107,
+              "cluster_b": 114,
+              "delta": 275.40515991039865
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 260,
+              "cluster_b": 268,
+              "delta": 265.7161013171208
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 45,
+              "cluster_b": 49,
+              "delta": 257.13155600058235
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 4,
+              "cluster_b": 9,
+              "delta": 255.37228296104513
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 38,
+              "cluster_b": 67,
+              "delta": 255.1478035346554
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 261,
+              "cluster_b": 280,
+              "delta": 226.93247816208896
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 330,
+              "cluster_b": 344,
+              "delta": 226.6111328395491
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 336,
+              "cluster_b": 361,
+              "delta": 217.24754048536124
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 35,
+              "cluster_b": 61,
+              "delta": 215.62760508609972
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 88,
+              "cluster_b": 95,
+              "delta": 213.3866362201552
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 6,
+              "cluster_b": 8,
+              "delta": 212.81895627033373
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 56,
+              "cluster_b": 59,
+              "delta": 208.91083538313615
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 58,
+              "cluster_b": 62,
+              "delta": 204.591740262862
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 63,
+              "cluster_b": 68,
+              "delta": 197.54235654480544
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 254,
+              "cluster_b": 267,
+              "delta": 196.58126837577947
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 270,
+              "cluster_b": 284,
+              "delta": 190.25922020174767
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 262,
+              "cluster_b": 281,
+              "delta": 188.11799741747382
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 11,
+              "cluster_b": 13,
+              "delta": 187.28436844821408
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 53,
+              "cluster_b": 66,
+              "delta": 179.7920874337051
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 57,
+              "cluster_b": 64,
+              "delta": 169.92052024983604
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 83,
+              "cluster_b": 108,
+              "delta": 169.7491014940315
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 257,
+              "cluster_b": 277,
+              "delta": 167.66003408036886
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 116,
+              "cluster_b": 118,
+              "delta": 165.79933500384504
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 1,
+              "cluster_b": 3,
+              "delta": 165.26592382823947
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 271,
+              "cluster_b": 273,
+              "delta": 165.2611989300476
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 318,
+              "cluster_b": 366,
+              "delta": 165.24624944859534
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 33,
+              "cluster_b": 60,
+              "delta": 161.6770325305897
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 73,
+              "cluster_b": 126,
+              "delta": 151.77945618144804
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 105,
+              "cluster_b": 130,
+              "delta": 151.65062446491356
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 79,
+              "cluster_b": 119,
+              "delta": 144.96790242153293
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 278,
+              "cluster_b": 283,
+              "delta": 138.14774393674634
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 41,
+              "cluster_b": 65,
+              "delta": 130.8855429994237
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 90,
+              "cluster_b": 98,
+              "delta": 121.63583395304158
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 2,
+              "cluster_b": 10,
+              "delta": 120.2422984954137
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 127,
+              "cluster_b": 128,
+              "delta": 119.3399974040658
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 272,
+              "cluster_b": 282,
+              "delta": 116.52526299275269
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 72,
+              "cluster_b": 84,
+              "delta": 113.83105621653885
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 313,
+              "cluster_b": 339,
+              "delta": 106.8111290820816
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 299,
+              "cluster_b": 319,
+              "delta": 104.83096986862802
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 85,
+              "cluster_b": 96,
+              "delta": 98.4868265423429
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 97,
+              "cluster_b": 115,
+              "delta": 93.86359323011129
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 100,
+              "cluster_b": 121,
+              "delta": 92.99948041218158
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 51,
+              "cluster_b": 112,
+              "delta": 91.81565136449535
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 102,
+              "cluster_b": 117,
+              "delta": 85.8976664602178
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 110,
+              "cluster_b": 129,
+              "delta": 83.99334178967547
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 75,
+              "cluster_b": 109,
+              "delta": 82.38334833102454
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 71,
+              "cluster_b": 122,
+              "delta": 81.9870416831036
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 308,
+              "cluster_b": 377,
+              "delta": 79.75728816872288
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 94,
+              "cluster_b": 124,
+              "delta": 75.09466462949968
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 104,
+              "cluster_b": 111,
+              "delta": 74.78096029919652
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 50,
+              "cluster_b": 125,
+              "delta": 68.83390025542303
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 269,
+              "cluster_b": 279,
+              "delta": 66.00907539764466
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 353,
+              "cluster_b": 372,
+              "delta": 64.67670858731071
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 123,
+              "cluster_b": 132,
+              "delta": 58.17227014278433
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 350,
+              "cluster_b": 360,
+              "delta": 57.67428002021916
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 291,
+              "cluster_b": 317,
+              "delta": 56.9406581817675
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 7,
+              "cluster_b": 12,
+              "delta": 53.280390403688216
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 93,
+              "cluster_b": 103,
+              "delta": 50.39641677227519
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 306,
+              "cluster_b": 383,
+              "delta": 48.67580871006794
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 356,
+              "cluster_b": 358,
+              "delta": 46.95612580708257
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 363,
+              "cluster_b": 375,
+              "delta": 45.31851962991277
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 324,
+              "cluster_b": 349,
+              "delta": 44.80875074726646
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 139,
+              "cluster_b": 148,
+              "delta": 44.66763745628123
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 78,
+              "cluster_b": 131,
+              "delta": 41.15466629976345
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 338,
+              "cluster_b": 343,
+              "delta": 36.46424314889009
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 300,
+              "cluster_b": 371,
+              "delta": 35.61974004625881
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 362,
+              "cluster_b": 380,
+              "delta": 32.81887557855043
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 316,
+              "cluster_b": 346,
+              "delta": 29.550186010255857
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 397,
+              "cluster_b": 399,
+              "delta": 28.746322618606428
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 368,
+              "cluster_b": 369,
+              "delta": 26.85054862729885
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 325,
+              "cluster_b": 327,
+              "delta": 23.800993184078834
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 309,
+              "cluster_b": 379,
+              "delta": 23.399982182048916
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 311,
+              "cluster_b": 312,
+              "delta": 22.191277188696404
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 331,
+              "cluster_b": 367,
+              "delta": 21.91034945627871
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 345,
+              "cluster_b": 382,
+              "delta": 21.881004369366565
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 386,
+              "cluster_b": 387,
+              "delta": 19.92546509134445
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 329,
+              "cluster_b": 378,
+              "delta": 18.66020526997636
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 328,
+              "cluster_b": 332,
+              "delta": 17.581773202455224
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 395,
+              "cluster_b": 396,
+              "delta": 17.389349436183693
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 138,
+              "cluster_b": 149,
+              "delta": 16.837733521799237
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 159,
+              "cluster_b": 168,
+              "delta": 13.963239197270013
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 305,
+              "cluster_b": 381,
+              "delta": 13.507893620777395
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 335,
+              "cluster_b": 347,
+              "delta": 12.294221337462659
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 314,
+              "cluster_b": 321,
+              "delta": 10.636824069613795
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 307,
+              "cluster_b": 348,
+              "delta": 10.095998509907076
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 166,
+              "cluster_b": 167,
+              "delta": 7.801387912799328
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 334,
+              "cluster_b": 359,
+              "delta": 7.039262136664547
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 364,
+              "cluster_b": 374,
+              "delta": 4.607134105739533
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 342,
+              "cluster_b": 365,
+              "delta": 3.816674953806796
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 352,
+              "cluster_b": 357,
+              "delta": 3.0262597370929143
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 151,
+              "cluster_b": 156,
+              "delta": 1.8408134683413664
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 326,
+              "cluster_b": 355,
+              "delta": 0.8462466872006189
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 310,
+              "cluster_b": 333,
+              "delta": 0.7349732815764582
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 285,
+              "cluster_b": 287,
+              "delta": 17519.44671560405
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 174,
+              "delta": 17234.660067531513
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 136,
+              "delta": 14562.847271742765
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 251,
+              "cluster_b": 253,
+              "delta": 9871.766051420942
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 22,
+              "cluster_b": 23,
+              "delta": 8023.063823443605
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 173,
+              "cluster_b": 183,
+              "delta": 6600.04044087755
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 288,
+              "cluster_b": 292,
+              "delta": 6215.891445232497
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 27,
+              "cluster_b": 31,
+              "delta": 4599.579339960474
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 77,
+              "cluster_b": 82,
+              "delta": 3332.212518360757
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 289,
+              "cluster_b": 322,
+              "delta": 2965.570385701023
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 255,
+              "cluster_b": 258,
+              "delta": 2589.489566968812
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 286,
+              "cluster_b": 293,
+              "delta": 2406.392021205742
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 0,
+              "cluster_b": 1,
+              "delta": 2059.453693345029
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 134,
+              "cluster_b": 141,
+              "delta": 2053.7301847007184
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 14,
+              "cluster_b": 16,
+              "delta": 1848.7288243637595
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 80,
+              "cluster_b": 81,
+              "delta": 1819.0537985076662
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 290,
+              "cluster_b": 294,
+              "delta": 1708.144519661466
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 29,
+              "cluster_b": 34,
+              "delta": 1624.7067834936315
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 384,
+              "cluster_b": 392,
+              "delta": 1225.349051388519
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 259,
+              "cluster_b": 266,
+              "delta": 1187.925387399373
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 220,
+              "cluster_b": 237,
+              "delta": 1080.2646230828905
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 330,
+              "cluster_b": 336,
+              "delta": 1046.2075128110737
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 70,
+              "cluster_b": 101,
+              "delta": 1027.5619336293603
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 76,
+              "cluster_b": 107,
+              "delta": 780.5485280032299
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 17,
+              "cluster_b": 19,
+              "delta": 761.5039089676902
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 25,
+              "cluster_b": 40,
+              "delta": 731.8954346628307
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 175,
+              "cluster_b": 176,
+              "delta": 631.5939776656887
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 299,
+              "cluster_b": 350,
+              "delta": 547.7634969529317
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 92,
+              "cluster_b": 116,
+              "delta": 543.4493952432094
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 260,
+              "cluster_b": 263,
+              "delta": 522.3382799823958
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 42,
+              "cluster_b": 44,
+              "delta": 475.61659686760686
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 24,
+              "cluster_b": 28,
+              "delta": 470.0726440472208
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 313,
+              "cluster_b": 318,
+              "delta": 454.35475635592593
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 37,
+              "cluster_b": 45,
+              "delta": 444.7592505131033
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 4,
+              "cluster_b": 11,
+              "delta": 425.0903987909114
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 254,
+              "cluster_b": 261,
+              "delta": 381.98319227092
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 72,
+              "cluster_b": 88,
+              "delta": 381.40705521368363
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 38,
+              "cluster_b": 58,
+              "delta": 375.28560525095963
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 262,
+              "cluster_b": 271,
+              "delta": 323.81520530539274
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 33,
+              "cluster_b": 63,
+              "delta": 311.23318538524836
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 35,
+              "cluster_b": 57,
+              "delta": 307.794257833968
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 53,
+              "cluster_b": 56,
+              "delta": 304.5512336001884
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 257,
+              "cluster_b": 270,
+              "delta": 299.1837767249963
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 2,
+              "cluster_b": 6,
+              "delta": 285.5886291027491
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 139,
+              "cluster_b": 140,
+              "delta": 269.6262963127592
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 83,
+              "cluster_b": 105,
+              "delta": 253.23096865551634
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 71,
+              "cluster_b": 79,
+              "delta": 237.80589961944497
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 272,
+              "cluster_b": 278,
+              "delta": 213.1359590193424
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 51,
+              "cluster_b": 85,
+              "delta": 157.50529049015677
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 291,
+              "cluster_b": 353,
+              "delta": 155.29021457842464
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 73,
+              "cluster_b": 90,
+              "delta": 151.33640580575593
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 75,
+              "cluster_b": 127,
+              "delta": 146.248197197463
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 41,
+              "cluster_b": 100,
+              "delta": 138.24281974503901
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 308,
+              "cluster_b": 356,
+              "delta": 114.31653606284817
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 94,
+              "cluster_b": 110,
+              "delta": 113.24086956768588
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 50,
+              "cluster_b": 97,
+              "delta": 109.17620652529513
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 300,
+              "cluster_b": 328,
+              "delta": 102.62739168980625
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 329,
+              "cluster_b": 364,
+              "delta": 96.7507604886705
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 306,
+              "cluster_b": 307,
+              "delta": 95.80054177474085
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 309,
+              "cluster_b": 325,
+              "delta": 87.12518943430041
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 102,
+              "cluster_b": 123,
+              "delta": 86.41991542056348
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 78,
+              "cluster_b": 104,
+              "delta": 68.16895611622022
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 363,
+              "cluster_b": 368,
+              "delta": 63.20995890692575
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 93,
+              "cluster_b": 120,
+              "delta": 45.217883980431
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 316,
+              "cluster_b": 345,
+              "delta": 42.95341976366035
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 311,
+              "cluster_b": 370,
+              "delta": 40.77118221476485
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 324,
+              "cluster_b": 342,
+              "delta": 32.74103159868537
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 338,
+              "cluster_b": 376,
+              "delta": 21.886653754711006
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 297,
+              "cluster_b": 326,
+              "delta": 19.421158086737705
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 335,
+              "cluster_b": 352,
+              "delta": 5.6653879473378765
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 314,
+              "cluster_b": 315,
+              "delta": 4.162076411936141
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 305,
+              "cluster_b": 331,
+              "delta": 3.977178207565885
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 173,
+              "delta": 18464.495539706666
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 285,
+              "cluster_b": 288,
+              "delta": 16538.436904692673
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 134,
+              "delta": 11061.223439663067
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 22,
+              "cluster_b": 27,
+              "delta": 10925.107395060477
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 251,
+              "cluster_b": 255,
+              "delta": 10069.782329877838
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 286,
+              "cluster_b": 289,
+              "delta": 6183.563724026724
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 77,
+              "cluster_b": 80,
+              "delta": 5773.551072902919
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 290,
+              "cluster_b": 330,
+              "delta": 3691.7716762218042
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 0,
+              "cluster_b": 4,
+              "delta": 3521.9673364253977
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 25,
+              "cluster_b": 29,
+              "delta": 2690.2924422405486
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 70,
+              "cluster_b": 76,
+              "delta": 2663.3351878915273
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 259,
+              "cluster_b": 260,
+              "delta": 2023.2419028847362
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 299,
+              "cluster_b": 313,
+              "delta": 1999.3929573105706
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 14,
+              "cluster_b": 17,
+              "delta": 1964.77850191974
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 72,
+              "cluster_b": 92,
+              "delta": 1378.383557766152
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 220,
+              "cluster_b": 223,
+              "delta": 1009.3362774843117
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 291,
+              "cluster_b": 308,
+              "delta": 958.4674425104458
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 384,
+              "cluster_b": 403,
+              "delta": 907.1072514868429
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 24,
+              "cluster_b": 37,
+              "delta": 896.5924863299151
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 254,
+              "cluster_b": 272,
+              "delta": 845.7751075519045
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 175,
+              "cluster_b": 184,
+              "delta": 802.2846622621291
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 73,
+              "cluster_b": 83,
+              "delta": 752.883219529831
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 38,
+              "cluster_b": 42,
+              "delta": 653.813166011867
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 257,
+              "cluster_b": 262,
+              "delta": 573.3757247751419
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 71,
+              "cluster_b": 75,
+              "delta": 567.3840684609895
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 306,
+              "cluster_b": 329,
+              "delta": 486.13239099329803
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 33,
+              "cluster_b": 53,
+              "delta": 477.5931956981876
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 300,
+              "cluster_b": 324,
+              "delta": 406.1588393023703
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 139,
+              "cluster_b": 147,
+              "delta": 380.5729530515964
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 2,
+              "cluster_b": 7,
+              "delta": 360.2076447547479
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 50,
+              "cluster_b": 94,
+              "delta": 327.4226460899954
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 35,
+              "cluster_b": 41,
+              "delta": 261.5111744169699
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 335,
+              "cluster_b": 363,
+              "delta": 223.56916927760176
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 297,
+              "cluster_b": 316,
+              "delta": 196.89162741120526
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 305,
+              "cluster_b": 309,
+              "delta": 188.91807521460578
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 51,
+              "cluster_b": 78,
+              "delta": 158.36836818473967
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 93,
+              "cluster_b": 102,
+              "delta": 74.55715020460775
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 311,
+              "cluster_b": 338,
+              "delta": 63.14881797225826
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 314,
+              "cluster_b": 334,
+              "delta": 2.9919015318519087
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 285,
+              "cluster_b": 286,
+              "delta": 17173.73590967292
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 22,
+              "cluster_b": 77,
+              "delta": 12772.493014762062
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 175,
+              "delta": 10619.808896563249
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 251,
+              "cluster_b": 259,
+              "delta": 9545.957833272405
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 139,
+              "delta": 8151.1872401183355
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 290,
+              "cluster_b": 299,
+              "delta": 6748.928998046089
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 70,
+              "cluster_b": 72,
+              "delta": 4776.085876955884
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 0,
+              "cluster_b": 2,
+              "delta": 4217.768204851294
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 24,
+              "cluster_b": 25,
+              "delta": 3646.1982109335368
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 291,
+              "cluster_b": 306,
+              "delta": 2481.959863139142
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 71,
+              "cluster_b": 73,
+              "delta": 2074.9487802678195
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 254,
+              "cluster_b": 257,
+              "delta": 1736.8894198596245
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 300,
+              "cluster_b": 335,
+              "delta": 1361.2732486365712
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 33,
+              "cluster_b": 38,
+              "delta": 1167.5515636017954
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 220,
+              "cluster_b": 232,
+              "delta": 981.6552003990873
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 297,
+              "cluster_b": 305,
+              "delta": 830.3899431142199
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 50,
+              "cluster_b": 93,
+              "delta": 719.253327270475
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 35,
+              "cluster_b": 51,
+              "delta": 682.1561754875293
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 384,
+              "cluster_b": 401,
+              "delta": 658.7186784064688
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 311,
+              "cluster_b": 314,
+              "delta": 376.14352905859414
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 285,
+              "cluster_b": 290,
+              "delta": 17965.236540960614
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 22,
+              "cluster_b": 70,
+              "delta": 12856.204073028872
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 251,
+              "cluster_b": 254,
+              "delta": 8406.145063667907
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 291,
+              "cluster_b": 300,
+              "delta": 4961.804886392492
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 24,
+              "cluster_b": 33,
+              "delta": 4871.65179804957
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 50,
+              "cluster_b": 71,
+              "delta": 3520.5136191823985
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 297,
+              "cluster_b": 311,
+              "delta": 2439.8134087647777
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 186,
+              "delta": 1805.7677337342466
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 158,
+              "delta": 1767.9450936326466
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 220,
+              "cluster_b": 225,
+              "delta": 694.8889020012139
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 384,
+              "cluster_b": 398,
+              "delta": 653.8748909391179
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 285,
+              "cluster_b": 291,
+              "delta": 15813.480862022494
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 22,
+              "cluster_b": 50,
+              "delta": 12381.715190080693
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 24,
+              "cluster_b": 35,
+              "delta": 4086.7072525946132
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 177,
+              "delta": 1601.9420554943572
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 152,
+              "delta": 1293.5419762703386
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 251,
+              "cluster_b": 269,
+              "delta": 866.3699193662978
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 297,
+              "cluster_b": 310,
+              "delta": 699.1409289790026
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 384,
+              "cluster_b": 394,
+              "delta": 645.8025969375194
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 220,
+              "cluster_b": 240,
+              "delta": 482.2327430662808
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 22,
+              "cluster_b": 24,
+              "delta": 14261.718051410513
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 285,
+              "cluster_b": 297,
+              "delta": 12228.982502978179
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 194,
+              "delta": 1448.3632590686102
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 146,
+              "delta": 986.4672735733038
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 384,
+              "cluster_b": 395,
+              "delta": 572.2435753814934
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 220,
+              "cluster_b": 229,
+              "delta": 373.5327691405255
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 191,
+              "delta": 1314.255003435188
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 165,
+              "delta": 897.0713041963463
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 285,
+              "cluster_b": 340,
+              "delta": 842.5596656674643
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 384,
+              "cluster_b": 397,
+              "delta": 500.1778886743523
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 220,
+              "delta": 372.08590213293064
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 181,
+              "delta": 1159.691422140444
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 160,
+              "delta": 898.8244011841089
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 285,
+              "cluster_b": 362,
+              "delta": 715.6982944607516
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 384,
+              "cluster_b": 391,
+              "delta": 491.7152407410031
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 243,
+              "delta": 317.9422529801195
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 215,
+              "delta": 1043.8746400069722
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 150,
+              "delta": 801.7157541116976
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 285,
+              "cluster_b": 341,
+              "delta": 699.3268698152897
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 384,
+              "cluster_b": 386,
+              "delta": 435.65666371646876
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 222,
+              "delta": 315.33796726370565
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 189,
+              "delta": 968.4868162496423
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 138,
+              "delta": 786.2444331379229
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 285,
+              "cluster_b": 337,
+              "delta": 690.3246807549185
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 384,
+              "cluster_b": 400,
+              "delta": 397.82689972239314
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 242,
+              "delta": 309.4946408242595
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 217,
+              "delta": 747.6948309319669
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 154,
+              "delta": 732.523168558957
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 285,
+              "cluster_b": 351,
+              "delta": 546.4841822264825
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 384,
+              "cluster_b": 388,
+              "delta": 371.72992329248154
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 233,
+              "delta": 306.16467241438295
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 169,
+              "delta": 728.7689805221307
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 212,
+              "delta": 641.1558451438541
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 285,
+              "cluster_b": 373,
+              "delta": 477.54209801703837
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 384,
+              "cluster_b": 402,
+              "delta": 295.3776008254554
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 235,
+              "delta": 287.90916600711716
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 151,
+              "delta": 693.9863120680056
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 205,
+              "delta": 639.6584655550541
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 224,
+              "delta": 287.54550995614227
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 384,
+              "cluster_b": 389,
+              "delta": 257.88218350926945
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 163,
+              "delta": 687.2952846395638
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 196,
+              "delta": 585.1155127297206
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 249,
+              "delta": 261.139725748395
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 384,
+              "cluster_b": 393,
+              "delta": 251.7368900192214
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 162,
+              "delta": 637.8743878405294
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 178,
+              "delta": 568.8287971591635
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 221,
+              "delta": 256.77952980434566
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 384,
+              "cluster_b": 390,
+              "delta": 194.97438728122324
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 142,
+              "delta": 606.529319620433
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 187,
+              "delta": 539.0827558185447
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 230,
+              "delta": 247.98874584341502
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 159,
+              "delta": 604.5584153702912
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 210,
+              "delta": 538.2094926977697
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 231,
+              "delta": 245.72209566508536
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 166,
+              "delta": 556.6741451929447
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 202,
+              "delta": 505.1820572333854
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 239,
+              "delta": 231.77391213159717
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 213,
+              "delta": 496.40186486440143
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 153,
+              "delta": 489.6000123536687
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 234,
+              "delta": 222.39616871312865
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 199,
+              "delta": 485.199314839203
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 155,
+              "delta": 458.8030990429943
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 227,
+              "delta": 214.3373953504415
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 195,
+              "delta": 460.8193901874838
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 161,
+              "delta": 457.89113946752695
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 241,
+              "delta": 193.51785866819773
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 214,
+              "delta": 432.3915886880095
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 145,
+              "delta": 364.2513437369107
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 248,
+              "delta": 182.0494754325009
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 203,
+              "delta": 371.52196374352206
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 157,
+              "delta": 316.0050235434501
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 238,
+              "delta": 179.92872056011583
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 201,
+              "delta": 347.42619784252383
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 133,
+              "cluster_b": 164,
+              "delta": 290.2579189140579
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 226,
+              "delta": 159.495464831547
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 193,
+              "delta": 294.702580927762
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 247,
+              "delta": 134.96119998528593
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 211,
+              "delta": 276.4753707597338
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 244,
+              "delta": 125.83193578625287
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 219,
+              "delta": 275.57033327678073
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 236,
+              "delta": 124.84861266272674
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 216,
+              "delta": 270.5855609508435
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 245,
+              "delta": 116.99451122832488
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 204,
+              "delta": 263.5048156457233
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 170,
+              "cluster_b": 246,
+              "delta": 106.55024491588301
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 209,
+              "delta": 249.96727173175896
+            },
+            {
+              "kind": "merge",
+              "cluster_a": 171,
+              "cluster_b": 198,
+              "delta": 237.6804183081167
+            }
+          ],
+          "stage": "coarsen"
+        },
+        "exact_cell_reassign": {
+          "n_steps": 20,
+          "n_passes": 2,
+          "delta": 13899.40897900756,
+          "operations": [
+            {
+              "kind": "move",
+              "cell": 103,
+              "source_cluster": 14,
+              "target_cluster": 22,
+              "delta": 2556.2355701153574
+            },
+            {
+              "kind": "move",
+              "cell": 2030,
+              "source_cluster": 206,
+              "target_cluster": 171,
+              "delta": 168.16382145319767
+            },
+            {
+              "kind": "move",
+              "cell": 2176,
+              "source_cluster": 218,
+              "target_cluster": 171,
+              "delta": 92.90308320808344
+            },
+            {
+              "kind": "move",
+              "cell": 2070,
+              "source_cluster": 207,
+              "target_cluster": 171,
+              "delta": 215.17352541648324
+            },
+            {
+              "kind": "move",
+              "cell": 1767,
+              "source_cluster": 170,
+              "target_cluster": 171,
+              "delta": 134.78535994124104
+            },
+            {
+              "kind": "move",
+              "cell": 1771,
+              "source_cluster": 185,
+              "target_cluster": 171,
+              "delta": 229.28544355705526
+            },
+            {
+              "kind": "move",
+              "cell": 197,
+              "source_cluster": 171,
+              "target_cluster": 133,
+              "delta": 284.2493011860606
+            },
+            {
+              "kind": "move",
+              "cell": 2078,
+              "source_cluster": 208,
+              "target_cluster": 171,
+              "delta": 100.59722336789218
+            },
+            {
+              "kind": "move",
+              "cell": 933,
+              "source_cluster": 171,
+              "target_cluster": 170,
+              "delta": 808.5885225738384
+            },
+            {
+              "kind": "move",
+              "cell": 1113,
+              "source_cluster": 171,
+              "target_cluster": 170,
+              "delta": 580.70930131977
+            },
+            {
+              "kind": "move",
+              "cell": 993,
+              "source_cluster": 171,
+              "target_cluster": 170,
+              "delta": 216.35755924114346
+            },
+            {
+              "kind": "move",
+              "cell": 180,
+              "source_cluster": 14,
+              "target_cluster": 22,
+              "delta": 2973.165614517493
+            },
+            {
+              "kind": "move",
+              "cell": 89,
+              "source_cluster": 14,
+              "target_cluster": 22,
+              "delta": 3171.4213397967687
+            },
+            {
+              "kind": "move",
+              "cell": 1808,
+              "source_cluster": 190,
+              "target_cluster": 171,
+              "delta": 163.91582345348797
+            },
+            {
+              "kind": "move",
+              "cell": 1175,
+              "source_cluster": 171,
+              "target_cluster": 170,
+              "delta": 894.1643957080669
+            },
+            {
+              "kind": "move",
+              "cell": 444,
+              "source_cluster": 171,
+              "target_cluster": 170,
+              "delta": 676.7862312850011
+            },
+            {
+              "kind": "move",
+              "cell": 2098,
+              "source_cluster": 250,
+              "target_cluster": 171,
+              "delta": 137.4472979542261
+            },
+            {
+              "kind": "move",
+              "cell": 1948,
+              "source_cluster": 200,
+              "target_cluster": 171,
+              "delta": 159.2841543463819
+            },
+            {
+              "kind": "move",
+              "cell": 1838,
+              "source_cluster": 192,
+              "target_cluster": 171,
+              "delta": 196.30178750952473
+            },
+            {
+              "kind": "move",
+              "cell": 1929,
+              "source_cluster": 197,
+              "target_cluster": 171,
+              "delta": 139.8736230564873
+            }
+          ]
+        },
+        "greedy_merge": {
+          "n_steps": 0,
+          "delta": 0.0,
+          "operations": [],
+          "stage": "coarsen"
+        },
+        "accepted_delta": 0.0,
+        "log_likelihood_before": -82106711.82337949,
+        "touch_sets": [],
+        "operations": [],
+        "active_clusters": 9,
+        "refinement": {
+          "n_steps": 0,
+          "delta": 0.0,
+          "operations": []
+        },
+        "cluster_reassign": {
+          "n_steps": 0,
+          "delta": 0.0,
+          "operations": [],
+          "stage": "coarsen"
+        },
+        "perturbation": {
+          "n_steps": 0,
+          "delta": 0.0,
+          "operations": [],
+          "enabled": true
+        },
+        "total_delta": 649201.10975847,
+        "partition_log_likelihood_after": -81457510.71362095,
+        "tau_update": {
+          "updated": false,
+          "delta": 0.0
+        },
+        "log_likelihood_after": -81457510.71362095,
+        "timing_s": {
+          "configure_s": 3.083306364715099e-05,
+          "full_merge_s": 76.62739987508394,
+          "exact_cell_reassign_s": 25.261714041000232,
+          "greedy_merge_s": 5.083158612251282e-06,
+          "proposal_s": 3.0237078748177737,
+          "scoring_s": 7.452198708197102,
+          "conflict_s": 0.00016366690397262573,
+          "commit_s": 4.5797787606716156e-07,
+          "serial_refine_s": 2.333894371986389e-06,
+          "cluster_reassign_s": 1.1248048394918442e-06,
+          "perturbation_s": 2.0829029381275177e-06,
+          "tau_update_s": 0.0
+        }
+      },
+      {
+        "restart": 0,
+        "round": 1,
+        "stage": "refine",
+        "family_weights": {
+          "merge": 0.26,
+          "peel": 0.1,
+          "move": 0.22,
+          "block_peel": 0.22,
+          "block_move": 0.2
+        },
+        "n_proposals": 4000,
+        "n_positive": 0,
+        "n_accepted": 0,
+        "full_merge": {
+          "n_steps": 0,
+          "delta": 0.0,
+          "operations": [],
+          "stage": "refine",
+          "n_sweeps": 0
+        },
+        "exact_cell_reassign": {
+          "n_steps": 0,
+          "n_passes": 1,
+          "delta": 0.0,
+          "operations": []
+        },
+        "greedy_merge": {
+          "n_steps": 0,
+          "n_sweeps": 0,
+          "delta": 0.0,
+          "operations": [],
+          "stage": "refine"
+        },
+        "accepted_delta": 0.0,
+        "log_likelihood_before": -81457510.71362095,
+        "touch_sets": [],
+        "operations": [],
+        "active_clusters": 9,
+        "refinement": {
+          "n_steps": 0,
+          "delta": 0.0,
+          "operations": []
+        },
+        "cluster_reassign": {
+          "n_steps": 0,
+          "delta": 0.0,
+          "operations": [],
+          "stage": "refine"
+        },
+        "perturbation": {
+          "n_steps": 0,
+          "delta": 0.0,
+          "operations": [],
+          "enabled": true
+        },
+        "total_delta": 0.0,
+        "partition_log_likelihood_after": -81457510.71362095,
+        "tau_update": {
+          "updated": false,
+          "delta": 0.0
+        },
+        "log_likelihood_after": -81457510.71362095,
+        "timing_s": {
+          "configure_s": 3.195903263986111e-05,
+          "full_merge_s": 1.4998950064182281e-06,
+          "exact_cell_reassign_s": 14.107763458043337,
+          "greedy_merge_s": 0.10703979199752212,
+          "proposal_s": 55.14031037501991,
+          "scoring_s": 5.376468249829486,
+          "conflict_s": 0.00014625000767409801,
+          "commit_s": 4.5797787606716156e-07,
+          "serial_refine_s": 1.291045919060707e-06,
+          "cluster_reassign_s": 9.16188582777977e-07,
+          "perturbation_s": 1.7918646335601807e-06,
+          "tau_update_s": 0.0
+        }
+      }
+    ],
+    "timing_s": {
+      "cluster_reassign_s": 2.040993422269821e-06,
+      "commit_s": 9.159557521343231e-07,
+      "configure_s": 6.27920962870121e-05,
+      "conflict_s": 0.00030991691164672375,
+      "exact_cell_reassign_s": 39.36947749904357,
+      "full_merge_s": 76.62740137497894,
+      "greedy_merge_s": 0.10704487515613437,
+      "perturbation_s": 3.874767571687698e-06,
+      "proposal_s": 58.16401824983768,
+      "scoring_s": 12.828666958026588,
+      "serial_refine_s": 3.6249402910470963e-06,
+      "tau_update_s": 0.0
+    },
+    "config": {
+      "init": "leiden_overclustered",
+      "leiden_target_clusters": 383,
+      "search_target_clusters": 95,
+      "backend": "torch-cpu",
+      "backend_threads": 6,
+      "n_proposals": 4000,
+      "max_rounds": null,
+      "pi_merge": 0.45,
+      "pi_peel": 0.08,
+      "pi_move": 0.17,
+      "pi_block_peel": 0.15,
+      "pi_block_move": 0.15,
+      "merge_uniform_prob": 0.1,
+      "peel_uniform_prob": 0.5,
+      "move_uniform_prob": 0.35,
+      "block_peel_uniform_prob": 0.35,
+      "block_move_uniform_prob": 0.3,
+      "top_merge_neighbors": 8,
+      "deterministic_merge_ratio": 0.25,
+      "merge_gene_cluster_cap": 24,
+      "block_size_min": 2,
+      "block_size_max": 16,
+      "staged_search": true,
+      "full_merge_stage": true,
+      "full_merge_active_limit": 1200,
+      "full_merge_score_chunk": 8192,
+      "full_merge_max_sweeps": 32,
+      "greedy_merge_sweeps": 2,
+      "greedy_merge_candidates": 2048,
+      "exact_cell_reassign_passes": 3,
+      "exact_cell_reassign_active_limit": 1200,
+      "exact_cell_reassign_top_fraction": 0.2,
+      "exact_cell_score_chunk": 512,
+      "cluster_reassign_sweeps": 0,
+      "cluster_reassign_max_sources": 256,
+      "perturb_every": 3,
+      "perturb_steps": 16,
+      "perturb_temperature": 1.0,
+      "serial_refine_passes": 0,
+      "seed": 1,
+      "update_psi": false,
+      "stall_rounds": 1,
+      "eta": 0.0
+    }
+  },
+  "paths": {
+    "cellstates_repo": "/Users/remy.nicolle/Workspace/DEV/cellstates",
+    "script_path": "/Users/remy.nicolle/Workspace/DEV/mcellstate/scripts/compare_cellstates_simulation.py",
+    "summary_json": "/Users/remy.nicolle/Workspace/DEV/mcellstate/benchmark_results/cellstates_comparison/summary.json"
+  }
+}
