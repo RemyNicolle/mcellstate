@@ -84,7 +84,7 @@ def run_fit(
     cmd = [
         sys.executable,
         "-m",
-        "dm_partition_opt",
+        "mcellstate",
         "fit",
         "--input",
         str(npz_path),
@@ -117,7 +117,7 @@ def run_fit(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Convert RNAmatrix TSV files to sparse NPZ and run dm_partition_opt on CUDA.",
+        description="Convert RNAmatrix TSV files to sparse NPZ and run mcellstate on CUDA.",
     )
     parser.add_argument("--input-root", type=Path, required=True, help="Root directory containing RNAmatrix*.tsv files.")
     parser.add_argument("--output-root", type=Path, required=True, help="Directory for labels and summary JSON outputs.")
@@ -133,7 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("effective", "gpu-heavy"),
         help="effective keeps the current mixed search; gpu-heavy reduces CPU-heavy refinement phases.",
     )
-    parser.add_argument("--backend", default="cuda", help="dm_partition_opt backend. Use cuda for GPU.")
+    parser.add_argument("--backend", default="cuda", help="mcellstate backend. Use cuda for GPU.")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--restarts", type=int, default=1)
     parser.add_argument("--n-proposals", type=int, default=4000)
