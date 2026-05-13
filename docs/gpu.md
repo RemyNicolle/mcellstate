@@ -3,7 +3,7 @@
 Use:
 
 ```bash
-mcellstate fit --input sample.npz --output labels.npy --preset gpu --backend cuda
+mcellstate fit --input sample.npz --output labels.npy --preset gpu --backend cuda --progress
 ```
 
 Important limitation: GPU acceleration in `mcellstate` currently speeds up proposal scoring, not the entire optimizer. CPU-side proposal generation, acceptance, and commit phases still exist.

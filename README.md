@@ -39,7 +39,7 @@ mcellstate convert --input RNAmatrix_sample.tsv --output sample.npz
 Fit a partition:
 
 ```bash
-mcellstate fit --input sample.npz --output labels.npy --preset gpu --backend cuda
+mcellstate fit --input sample.npz --output labels.npy --preset gpu --backend cuda --progress
 ```
 
 Audit the fitted labels for likely doublets:

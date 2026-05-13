@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import time
+from typing import TextIO
 
 import numpy as np
 
@@ -181,9 +182,15 @@ class Optimizer:
         improvement_window: int = 5,
         eta: float = 1e-8,
         restart_inits: list[str] | None = None,
+        progress: bool = False,
+        verbose: bool = False,
+        progress_stream: TextIO | None = None,
+        verbose_stream: TextIO | None = None,
     ) -> FitResult:
         best_result: FitResult | None = None
         histories: list[dict] = []
+        progress_stream = progress_stream or None
+        verbose_stream = verbose_stream or None
 
         for restart in range(int(restarts)):
             state = self._make_restart_state(restart, restart_inits=restart_inits)
@@ -201,37 +208,89 @@ class Optimizer:
                 round_before_ll = current_ll
                 stage = self._stage_name(state)
                 self.sampler.set_scoring_context(psi)
+                if verbose:
+                    self._emit_verbose(
+                        stream=verbose_stream,
+                        restart=restart,
+                        round_idx=round_idx,
+                        stage=stage,
+                        message="round start",
+                    )
 
                 timing: dict[str, float] = {}
                 timer = time.perf_counter()
+                if verbose:
+                    self._emit_verbose(
+                        stream=verbose_stream,
+                        restart=restart,
+                        round_idx=round_idx,
+                        stage=stage,
+                        message="configure stage",
+                    )
                 self._configure_stage(state, stage)
                 timing["configure_s"] = time.perf_counter() - timer
 
                 timer = time.perf_counter()
+                if verbose:
+                    self._emit_verbose(stream=verbose_stream, restart=restart, round_idx=round_idx, stage=stage, message="full merge phase")
                 full_merge = self._full_merge_phase(state, backend, stage=stage)
                 timing["full_merge_s"] = time.perf_counter() - timer
                 if full_merge["delta"] != 0.0:
                     current_ll = full_partition_log_likelihood(state, psi)
 
                 timer = time.perf_counter()
+                if verbose:
+                    self._emit_verbose(
+                        stream=verbose_stream,
+                        restart=restart,
+                        round_idx=round_idx,
+                        stage=stage,
+                        message="exact cell reassignment phase",
+                    )
                 exact_cell_reassign = self._exact_cell_reassignment_sweep(state, backend, stage=stage)
                 timing["exact_cell_reassign_s"] = time.perf_counter() - timer
                 if exact_cell_reassign["delta"] != 0.0:
                     current_ll = full_partition_log_likelihood(state, psi)
 
                 timer = time.perf_counter()
+                if verbose:
+                    self._emit_verbose(stream=verbose_stream, restart=restart, round_idx=round_idx, stage=stage, message="greedy merge phase")
                 greedy_merge = self._greedy_merge_sweep(state, backend, stage=stage)
                 timing["greedy_merge_s"] = time.perf_counter() - timer
                 if greedy_merge["delta"] != 0.0:
                     current_ll = full_partition_log_likelihood(state, psi)
 
                 timer = time.perf_counter()
+                if verbose:
+                    self._emit_verbose(
+                        stream=verbose_stream,
+                        restart=restart,
+                        round_idx=round_idx,
+                        stage=stage,
+                        message=f"sample {self.n_proposals} proposals",
+                    )
                 proposals = self.sampler.sample_batch(state, self.n_proposals)
                 timing["proposal_s"] = time.perf_counter() - timer
                 timer = time.perf_counter()
+                if verbose:
+                    self._emit_verbose(
+                        stream=verbose_stream,
+                        restart=restart,
+                        round_idx=round_idx,
+                        stage=stage,
+                        message=f"score {len(proposals)} proposals on {self.backend_name}",
+                    )
                 scores = backend.score_batch(state, proposals)
                 timing["scoring_s"] = time.perf_counter() - timer
                 timer = time.perf_counter()
+                if verbose:
+                    self._emit_verbose(
+                        stream=verbose_stream,
+                        restart=restart,
+                        round_idx=round_idx,
+                        stage=stage,
+                        message="select non-conflicting positives",
+                    )
                 accepted = self._select_positive_nonconflicting(proposals, scores)
                 timing["conflict_s"] = time.perf_counter() - timer
                 accepted_delta = float(sum(item["delta"] for item in accepted))
@@ -258,24 +317,44 @@ class Optimizer:
                 timer = time.perf_counter()
                 touched_clusters: set[int] = set()
                 if accepted:
+                    if verbose:
+                        self._emit_verbose(
+                            stream=verbose_stream,
+                            restart=restart,
+                            round_idx=round_idx,
+                            stage=stage,
+                            message=f"commit {len(accepted)} accepted operations",
+                        )
                     touched_clusters = self._commit_batch(state, accepted)
                     self.sampler.notify_state_changed(state, touched_clusters)
                     current_ll = full_partition_log_likelihood(state, psi)
                 timing["commit_s"] = time.perf_counter() - timer
 
                 timer = time.perf_counter()
+                if verbose:
+                    self._emit_verbose(stream=verbose_stream, restart=restart, round_idx=round_idx, stage=stage, message="serial refine phase")
                 refinement = self._serial_refine(state, psi, backend, touched_clusters, stage)
                 timing["serial_refine_s"] = time.perf_counter() - timer
                 if refinement["delta"] != 0.0:
                     current_ll = full_partition_log_likelihood(state, psi)
 
                 timer = time.perf_counter()
+                if verbose:
+                    self._emit_verbose(
+                        stream=verbose_stream,
+                        restart=restart,
+                        round_idx=round_idx,
+                        stage=stage,
+                        message="cluster reassignment phase",
+                    )
                 cluster_reassign = self._cluster_reassignment_sweep(state, backend, stage=stage)
                 timing["cluster_reassign_s"] = time.perf_counter() - timer
                 if cluster_reassign["delta"] != 0.0:
                     current_ll = full_partition_log_likelihood(state, psi)
 
                 timer = time.perf_counter()
+                if verbose:
+                    self._emit_verbose(stream=verbose_stream, restart=restart, round_idx=round_idx, stage=stage, message="perturbation phase")
                 perturbation = self._perturbation_phase(state, backend, round_idx, stage)
                 timing["perturbation_s"] = time.perf_counter() - timer
                 if perturbation["delta"] != 0.0:
@@ -329,6 +408,22 @@ class Optimizer:
                 round_record["log_likelihood_after"] = current_ll
                 round_record["timing_s"] = timing
                 history.append(round_record)
+                if progress:
+                    self._emit_progress(
+                        stream=progress_stream,
+                        restart=restart,
+                        round_idx=round_idx,
+                        stage=stage,
+                        round_record=round_record,
+                    )
+                if verbose:
+                    self._emit_verbose(
+                        stream=verbose_stream,
+                        restart=restart,
+                        round_idx=round_idx,
+                        stage=stage,
+                        message="round end",
+                    )
 
                 n_positive_steps = (
                     int(full_merge["n_steps"])
@@ -369,6 +464,81 @@ class Optimizer:
             psi=best_result.psi.copy(),
             restart_summaries=histories,
         )
+
+    def _emit_progress(
+        self,
+        *,
+        stream: TextIO | None,
+        restart: int,
+        round_idx: int,
+        stage: str,
+        round_record: dict,
+    ) -> None:
+        import sys
+
+        out = stream or sys.stdout
+        timing = round_record.get("timing_s", {})
+        total_timing = sum(float(value) for value in timing.values())
+        gpu_mem = self._cuda_memory_report()
+        parts = [
+            f"[fit] restart={restart}",
+            f"round={round_idx}",
+            f"stage={stage}",
+            f"clusters={round_record.get('active_clusters')}",
+            f"ll_before={round_record.get('log_likelihood_before'):.3f}",
+            f"ll_after={round_record.get('log_likelihood_after'):.3f}",
+            f"accepted={round_record.get('n_accepted')}",
+            f"positive={round_record.get('n_positive')}",
+            f"timing_s={total_timing:.3f}",
+        ]
+        for key in (
+            "configure_s",
+            "full_merge_s",
+            "exact_cell_reassign_s",
+            "greedy_merge_s",
+            "proposal_s",
+            "scoring_s",
+            "conflict_s",
+            "commit_s",
+            "serial_refine_s",
+            "cluster_reassign_s",
+            "perturbation_s",
+            "tau_update_s",
+        ):
+            if key in timing:
+                parts.append(f"{key}={float(timing[key]):.3f}")
+        if gpu_mem is not None:
+            allocated_mb, reserved_mb = gpu_mem
+            parts.append(f"cuda_mb={allocated_mb:.0f}/{reserved_mb:.0f}")
+        print(" ".join(parts), file=out, flush=True)
+
+    def _emit_verbose(
+        self,
+        *,
+        stream: TextIO | None,
+        restart: int,
+        round_idx: int,
+        stage: str,
+        message: str,
+    ) -> None:
+        import sys
+
+        out = stream or sys.stdout
+        print(f"[trace] restart={restart} round={round_idx} stage={stage} {message}", file=out, flush=True)
+
+    def _cuda_memory_report(self) -> tuple[float, float] | None:
+        try:
+            from .backends import torch
+        except Exception:  # pragma: no cover - defensive
+            return None
+        if torch is None or not torch.cuda.is_available():
+            return None
+        try:
+            allocated = float(torch.cuda.memory_allocated() / (1024.0 * 1024.0))
+            reserved = float(torch.cuda.memory_reserved() / (1024.0 * 1024.0))
+        except Exception:  # pragma: no cover - defensive
+            return None
+        return allocated, reserved
 
     def _make_restart_state(
         self,

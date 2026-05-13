@@ -93,6 +93,8 @@ def build_parser() -> argparse.ArgumentParser:
     fit.add_argument("--target-clusters", type=int, default=None, help="Optional staged-search target.")
     fit.add_argument("--validate-batches", action="store_true", help="Validate batch gains exactly.")
     fit.add_argument("--update-psi", action="store_true", help="Optionally update tau during optimization.")
+    fit.add_argument("--progress", action="store_true", help="Print per-round timing and progress output.")
+    fit.add_argument("--verbose", action="store_true", help="Print every optimizer step as it runs.")
 
     audit = subparsers.add_parser("audit-doublets", help="Audit an existing partition for likely doublets.")
     audit.add_argument("--input", required=True, type=Path, help="Input count matrix (.npz, .mtx, or .npy).")
@@ -165,6 +167,8 @@ def run_fit(args: argparse.Namespace) -> dict:
         stall_rounds=int(args.stall_rounds),
         improvement_window=int(args.improvement_window),
         eta=float(args.eta),
+        progress=bool(args.progress),
+        verbose=bool(args.verbose),
     )
     elapsed = time.perf_counter() - start
 

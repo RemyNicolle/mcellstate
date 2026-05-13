@@ -57,6 +57,88 @@ def test_cli_fit_runs_end_to_end(tmp_path):
     assert summary["preset"] == "gpu"
 
 
+def test_cli_fit_progress_mode_prints_timing(tmp_path, capsys):
+    synthetic = generate_synthetic_dataset(
+        n_clusters=2,
+        cells_per_cluster=4,
+        n_genes=12,
+        marker_strength=30.0,
+        seed=62,
+    )
+    input_path = tmp_path / "counts.npz"
+    output_path = tmp_path / "labels.npy"
+    sparse.save_npz(input_path, synthetic.X)
+
+    exit_code = main(
+        [
+            "fit",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--preset",
+            "gpu",
+            "--backend",
+            "cpu",
+            "--init",
+            "singletons",
+            "--n-proposals",
+            "64",
+            "--max-rounds",
+            "2",
+            "--seed",
+            "62",
+            "--progress",
+        ],
+    )
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "[fit]" in captured.out
+    assert "timing_s=" in captured.out
+
+
+def test_cli_fit_verbose_mode_prints_steps(tmp_path, capsys):
+    synthetic = generate_synthetic_dataset(
+        n_clusters=2,
+        cells_per_cluster=4,
+        n_genes=12,
+        marker_strength=30.0,
+        seed=63,
+    )
+    input_path = tmp_path / "counts.npz"
+    output_path = tmp_path / "labels.npy"
+    sparse.save_npz(input_path, synthetic.X)
+
+    exit_code = main(
+        [
+            "fit",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--preset",
+            "gpu",
+            "--backend",
+            "cpu",
+            "--init",
+            "singletons",
+            "--n-proposals",
+            "32",
+            "--max-rounds",
+            "1",
+            "--seed",
+            "63",
+            "--verbose",
+        ],
+    )
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "[trace]" in captured.out
+    assert "sample" in captured.out or "score" in captured.out
+
+
 def test_cli_convert_and_audit_doublets(tmp_path):
     tsv_path = tmp_path / "RNAmatrix_test.tsv"
     tsv_path.write_text("GeneID\tcell_a\tcell_b\nG1\t1\t0\nG2\t0\t2\n")

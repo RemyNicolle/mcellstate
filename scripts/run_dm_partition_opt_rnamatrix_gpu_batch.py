@@ -74,6 +74,8 @@ def run_fit(
     improvement_window: int,
     eta: float,
     overwrite: bool,
+    progress: bool,
+    verbose: bool,
 ) -> None:
     summary_path = labels_path.with_suffix(".json")
     if labels_path.exists() and summary_path.exists() and not overwrite:
@@ -111,6 +113,10 @@ def run_fit(
         "--eta",
         str(eta),
     ]
+    if progress:
+        cmd.append("--progress")
+    if verbose:
+        cmd.append("--verbose")
     print("run:", " ".join(cmd), flush=True)
     subprocess.run(cmd, check=True)
 
@@ -141,6 +147,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stall-rounds", type=int, default=1)
     parser.add_argument("--improvement-window", type=int, default=5)
     parser.add_argument("--eta", type=float, default=0.0)
+    parser.add_argument("--progress", dest="progress", action="store_true", help="Print per-round timing output.")
+    parser.add_argument("--no-progress", dest="progress", action="store_false", help="Disable per-round timing output.")
+    parser.set_defaults(progress=True)
+    parser.add_argument("--verbose", action="store_true", help="Print every optimizer step as it runs.")
     parser.add_argument("--force-convert", action="store_true", help="Rebuild cached NPZ files.")
     parser.add_argument("--overwrite", action="store_true", help="Rerun fits even if labels and JSON already exist.")
     return parser
@@ -176,6 +186,8 @@ def main(argv: list[str] | None = None) -> int:
             improvement_window=int(args.improvement_window),
             eta=float(args.eta),
             overwrite=bool(args.overwrite),
+            progress=bool(args.progress),
+            verbose=bool(args.verbose),
         )
     return 0
 

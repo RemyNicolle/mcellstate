@@ -22,6 +22,6 @@ Minimal workflow:
 
 ```bash
 mcellstate convert --input RNAmatrix_sample.tsv --output sample.npz
-mcellstate fit --input sample.npz --output labels.npy --preset gpu --backend cuda
+mcellstate fit --input sample.npz --output labels.npy --preset gpu --backend cuda --progress
 mcellstate audit-doublets --input sample.npz --labels labels.npy --output doublets.tsv
 ```
