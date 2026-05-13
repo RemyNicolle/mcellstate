@@ -3,10 +3,11 @@
 Install:
 
 ```bash
-python -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
-pip install -e .
+pip install -U setuptools wheel
+pip install --no-build-isolation -e .
 ```
 
 If you have an NVIDIA GPU:
@@ -14,6 +15,8 @@ If you have an NVIDIA GPU:
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu121
 ```
+
+Python 3.11 or newer is required.
 
 Minimal workflow:
 

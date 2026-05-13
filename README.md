@@ -13,10 +13,11 @@
 ## Install
 
 ```bash
-python -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
-pip install -e .
+pip install -U setuptools wheel
+pip install --no-build-isolation -e .
 ```
 
 For CUDA:
@@ -24,6 +25,8 @@ For CUDA:
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu121
 ```
+
+`mcellstate` requires Python 3.11 or newer.
 
 ## Quick start
 
