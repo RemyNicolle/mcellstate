@@ -3,7 +3,8 @@ from __future__ import annotations
 import argparse
 import csv
 import subprocess
-import sys
+import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -156,8 +157,11 @@ def main(argv: list[str] | None = None) -> int:
         stem = tsv_path.stem
         npz_path = args.cache_root / relative.with_suffix(".npz")
         labels_path = args.output_root / relative.parent / f"{stem}.labels.npy"
-        print(f"prepare: {tsv_path}", flush=True)
+        start_time = datetime.now()
+        print(f"[START] {tsv_path} {start_time.isoformat()}", flush=True)
         convert_to_npz(tsv_path, npz_path, force=bool(args.force_convert))
+        end_time = datetime.now()
+        print(f"[END] {tsv_path} {end_time.isoformat()} duration={(end_time - start_time).total_seconds():.2f}s", flush=True)
         run_fit(
             npz_path,
             labels_path,
