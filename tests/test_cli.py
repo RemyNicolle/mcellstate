@@ -139,6 +139,53 @@ def test_cli_fit_verbose_mode_prints_steps(tmp_path, capsys):
     assert "sample" in captured.out or "score" in captured.out
 
 
+def test_cli_cpu_preset_forces_cpu_backend_and_records_proposal_workers(tmp_path):
+    synthetic = generate_synthetic_dataset(
+        n_clusters=2,
+        cells_per_cluster=4,
+        n_genes=12,
+        marker_strength=30.0,
+        seed=64,
+    )
+    input_path = tmp_path / "counts.npz"
+    output_path = tmp_path / "labels.npy"
+    summary_path = tmp_path / "summary.json"
+    sparse.save_npz(input_path, synthetic.X)
+
+    exit_code = main(
+        [
+            "fit",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--summary-json",
+            str(summary_path),
+            "--preset",
+            "cpu",
+            "--backend",
+            "auto",
+            "--init",
+            "singletons",
+            "--n-proposals",
+            "32",
+            "--max-rounds",
+            "1",
+            "--seed",
+            "64",
+            "--proposal-workers",
+            "2",
+        ],
+    )
+
+    assert exit_code == 0
+    summary = json.loads(summary_path.read_text())
+    assert summary["preset"] == "cpu"
+    assert summary["optimizer_mode"] == "cpu-only"
+    assert summary["backend"] == "torch-cpu"
+    assert summary["proposal_workers"] == 2
+
+
 def test_cli_convert_and_audit_doublets(tmp_path):
     tsv_path = tmp_path / "RNAmatrix_test.tsv"
     tsv_path.write_text("GeneID\tcell_a\tcell_b\nG1\t1\t0\nG2\t0\t2\n")

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+import copy
 from dataclasses import dataclass
 import time
 from typing import Callable, Literal
@@ -109,6 +111,10 @@ class ProposalSampler:
         block_size_min: int = 2,
         block_size_max: int = 12,
         block_candidate_cells: int = 32,
+        move_focus_genes: int = 4,
+        move_candidate_cap_per_gene: int = 8,
+        move_candidate_cap_total: int = 32,
+        proposal_workers: int = 1,
         seed: int | None = None,
     ) -> None:
         weights = np.asarray(
@@ -142,22 +148,30 @@ class ProposalSampler:
         self.block_size_min = int(block_size_min)
         self.block_size_max = int(block_size_max)
         self.block_candidate_cells = int(block_candidate_cells)
+        self.move_focus_genes = int(move_focus_genes)
+        self.move_candidate_cap_per_gene = int(move_candidate_cap_per_gene)
+        self.move_candidate_cap_total = int(move_candidate_cap_total)
+        self.proposal_workers = max(1, int(proposal_workers))
         self.rng = np.random.default_rng(seed)
 
         self._prepared_version: int | None = None
         self._pending_signature_refresh: set[int] = set()
+        self._pending_gene_refresh: set[int] = set()
         self._active_clusters = np.empty(0, dtype=np.int64)
+        self._cluster_lookup = np.empty(0, dtype=np.int64)
         self._non_singletons = np.empty(0, dtype=np.int64)
         self._idf_weights = np.empty(0, dtype=np.float64)
         self._signature_pools: dict[int, np.ndarray] = {}
         self._signature_genes: dict[int, np.ndarray] = {}
         self._signature_weights: dict[int, np.ndarray] = {}
+        self._signature_gene_sources: dict[int, set[int]] = {}
         self._merge_neighbors: dict[int, np.ndarray] = {}
         self._merge_neighbor_weights: dict[int, np.ndarray] = {}
         self._merge_neighbor_sources = np.empty(0, dtype=np.int64)
+        self._merge_pair_scores: dict[tuple[int, int], float] = {}
         self._deterministic_merge_pairs: list[tuple[int, int]] = []
         self._non_singleton_probs = np.empty(0, dtype=np.float64)
-        self._candidate_clusters_cache: dict[int, np.ndarray] = {}
+        self._candidate_clusters_cache: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
         self._psi: np.ndarray | None = None
         self._trace: Callable[[str], None] | None = None
 
@@ -189,6 +203,7 @@ class ProposalSampler:
         if touched_clusters is None:
             touched_clusters = state.last_touched_clusters
         self._pending_signature_refresh.update(int(cluster_id) for cluster_id in touched_clusters)
+        self._pending_gene_refresh.update(int(gene) for gene in np.asarray(state.last_touched_genes, dtype=np.int64))
 
     def prepare_round(self, state: PartitionState) -> None:
         if self._prepared_version == state.version:
@@ -196,6 +211,7 @@ class ProposalSampler:
         start = time.perf_counter()
         self._emit_trace("sampler prepare_round start")
         self._active_clusters = state.active_cluster_array()
+        self._refresh_cluster_lookup()
         self._non_singletons = np.asarray(sorted(state.non_singleton_cluster_ids()), dtype=np.int64)
         if self._non_singletons.size:
             sizes = np.asarray([state.cluster_size(cluster_id) for cluster_id in self._non_singletons], dtype=np.float64)
@@ -203,7 +219,11 @@ class ProposalSampler:
             self._non_singleton_probs = sizes / total if total > 0.0 else np.full_like(sizes, 1.0 / float(len(sizes)))
         else:
             self._non_singleton_probs = np.empty(0, dtype=np.float64)
-        self._candidate_clusters_cache = {}
+        full_neighbor_rebuild = not self._merge_neighbors or self._prepared_version is None
+        if full_neighbor_rebuild:
+            self._candidate_clusters_cache = {}
+        else:
+            self._invalidate_candidate_cluster_cache(self._pending_gene_refresh)
         self._idf_weights = np.log(
             (len(self._active_clusters) + 1.0) / (state.gene_cluster_counts.astype(np.float64) + 1.0),
         )
@@ -212,10 +232,11 @@ class ProposalSampler:
         t2 = time.perf_counter()
         self._refresh_current_signatures(state)
         t3 = time.perf_counter()
-        self._rebuild_merge_neighbors(state)
+        self._rebuild_merge_neighbors(state, full_rebuild=full_neighbor_rebuild)
         t4 = time.perf_counter()
         self._prepared_version = state.version
         self._pending_signature_refresh.clear()
+        self._pending_gene_refresh.clear()
         self._emit_trace(
             "sampler prepare_round done "
             f"total_s={t4 - start:.3f} "
@@ -254,6 +275,7 @@ class ProposalSampler:
     def _refresh_current_signatures(self, state: PartitionState) -> None:
         self._signature_genes = {}
         self._signature_weights = {}
+        signature_gene_sources: dict[int, set[int]] = defaultdict(set)
         for cluster_id in self._active_clusters.tolist():
             pool = self._signature_pools.get(int(cluster_id))
             if pool is None or pool.size == 0:
@@ -276,66 +298,169 @@ class ProposalSampler:
                 chosen_weights = np.asarray(candidate_weights[order], dtype=np.float64)
             self._signature_genes[int(cluster_id)] = chosen_genes
             self._signature_weights[int(cluster_id)] = chosen_weights
+            for gene in chosen_genes.tolist():
+                signature_gene_sources[int(gene)].add(int(cluster_id))
+        self._signature_gene_sources = dict(signature_gene_sources)
 
-    def _rebuild_merge_neighbors(self, state: PartitionState) -> None:
-        merge_neighbors: dict[int, np.ndarray] = {}
-        merge_neighbor_weights: dict[int, np.ndarray] = {}
-        pair_scores: dict[tuple[int, int], float] = defaultdict(float)
+    def _refresh_cluster_lookup(self) -> None:
+        if self._active_clusters.size == 0:
+            self._cluster_lookup = np.empty(0, dtype=np.int64)
+            return
+        max_cluster_id = int(np.max(self._active_clusters))
+        self._cluster_lookup = np.full(max_cluster_id + 1, -1, dtype=np.int64)
+        self._cluster_lookup[self._active_clusters] = np.arange(self._active_clusters.size, dtype=np.int64)
 
-        for cluster_id in self._active_clusters.tolist():
-            signature_genes = self._signature_genes.get(int(cluster_id))
-            signature_weights = self._signature_weights.get(int(cluster_id))
-            if signature_genes is None or signature_genes.size == 0:
-                continue
-            candidate_scores: dict[int, float] = defaultdict(float)
-            for gene, source_weight in zip(signature_genes, signature_weights, strict=True):
-                candidate_clusters = self._candidate_clusters_for_gene(state, int(gene))
-                if candidate_clusters.size == 0:
-                    continue
-                idf = max(float(self._idf_weights[int(gene)]), 0.0)
-                for target_cluster in candidate_clusters:
-                    target_cluster = int(target_cluster)
-                    if target_cluster == int(cluster_id):
-                        continue
-                    target_weight = float(state.clusters[target_cluster].get(int(gene))) * idf
-                    if target_weight <= 0.0:
-                        continue
-                    candidate_scores[target_cluster] += min(float(source_weight), target_weight)
-            if not candidate_scores:
-                continue
-            ranked = sorted(candidate_scores.items(), key=lambda item: item[1], reverse=True)[: self.top_merge_neighbors]
-            neighbors = np.asarray([target for target, _ in ranked], dtype=np.int64)
-            weights = np.asarray([score for _, score in ranked], dtype=np.float64)
-            weights = weights / weights.sum()
-            merge_neighbors[int(cluster_id)] = neighbors
-            merge_neighbor_weights[int(cluster_id)] = weights
-            for target, score in ranked:
-                pair_scores[tuple(sorted((int(cluster_id), int(target))))] += float(score)
+    def _invalidate_candidate_cluster_cache(self, genes: set[int]) -> None:
+        for gene in genes:
+            self._candidate_clusters_cache.pop(int(gene), None)
 
-        ordered_pairs = sorted(pair_scores.items(), key=lambda item: item[1], reverse=True)
-        self._merge_neighbors = merge_neighbors
-        self._merge_neighbor_weights = merge_neighbor_weights
-        self._merge_neighbor_sources = np.asarray(sorted(merge_neighbors), dtype=np.int64) if merge_neighbors else np.empty(0, dtype=np.int64)
-        self._deterministic_merge_pairs = [pair for pair, _ in ordered_pairs]
-
-    def _candidate_clusters_for_gene(self, state: PartitionState, gene: int) -> np.ndarray:
+    def _candidate_cluster_data_for_gene(
+        self,
+        state: PartitionState,
+        gene: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         cached = self._candidate_clusters_cache.get(int(gene))
         if cached is not None:
             return cached
         clusters = state.gene_to_clusters.get(int(gene))
         if not clusters:
-            result = np.empty(0, dtype=np.int64)
+            result = (
+                np.empty(0, dtype=np.int64),
+                np.empty(0, dtype=np.int64),
+                np.empty(0, dtype=np.int64),
+            )
             self._candidate_clusters_cache[int(gene)] = result
             return result
-        cluster_ids = np.asarray(sorted(int(cluster_id) for cluster_id in clusters), dtype=np.int64)
-        if cluster_ids.size <= self.merge_gene_cluster_cap:
-            self._candidate_clusters_cache[int(gene)] = cluster_ids
-            return cluster_ids
+        cluster_ids = np.fromiter((int(cluster_id) for cluster_id in clusters), dtype=np.int64, count=len(clusters))
         counts = np.asarray([state.clusters[int(cluster_id)].get(int(gene)) for cluster_id in cluster_ids], dtype=np.int64)
-        order = np.argsort(counts)[::-1][: self.merge_gene_cluster_cap]
-        result = np.asarray(cluster_ids[order], dtype=np.int64)
+        order = np.argsort(counts)[::-1]
+        cluster_ids = cluster_ids[order]
+        counts = counts[order]
+        if cluster_ids.size <= self.merge_gene_cluster_cap:
+            truncated_ids = cluster_ids
+            truncated_counts = counts
+        else:
+            truncated_ids = np.asarray(cluster_ids[: self.merge_gene_cluster_cap], dtype=np.int64)
+            truncated_counts = np.asarray(counts[: self.merge_gene_cluster_cap], dtype=np.int64)
+        valid = truncated_ids < self._cluster_lookup.size
+        truncated_ids = truncated_ids[valid]
+        truncated_counts = truncated_counts[valid]
+        positions = self._cluster_lookup[truncated_ids] if truncated_ids.size else np.empty(0, dtype=np.int64)
+        valid_positions = positions >= 0
+        result = (
+            np.asarray(truncated_ids[valid_positions], dtype=np.int64),
+            np.asarray(positions[valid_positions], dtype=np.int64),
+            np.asarray(truncated_counts[valid_positions], dtype=np.int64),
+        )
         self._candidate_clusters_cache[int(gene)] = result
         return result
+
+    def _candidate_clusters_for_gene(self, state: PartitionState, gene: int) -> np.ndarray:
+        cluster_ids, _, _ = self._candidate_cluster_data_for_gene(state, gene)
+        return cluster_ids
+
+    def _top_cluster_ids_from_scores(
+        self,
+        scores: np.ndarray,
+        *,
+        limit: int | None,
+        exclude_cluster: int | None = None,
+    ) -> list[int]:
+        candidate_positions = np.flatnonzero(scores > 0.0)
+        if exclude_cluster is not None and 0 <= int(exclude_cluster) < self._cluster_lookup.size:
+            source_pos = int(self._cluster_lookup[int(exclude_cluster)])
+            if source_pos >= 0:
+                candidate_positions = candidate_positions[candidate_positions != source_pos]
+        if candidate_positions.size == 0:
+            return []
+        if limit is not None and candidate_positions.size > int(limit):
+            top_rel = np.argpartition(scores[candidate_positions], -int(limit))[-int(limit):]
+            candidate_positions = candidate_positions[top_rel]
+        order = np.argsort(scores[candidate_positions])[::-1]
+        return [int(self._active_clusters[pos]) for pos in candidate_positions[order]]
+
+    def _build_merge_neighbors_for_source(
+        self,
+        state: PartitionState,
+        source_cluster: int,
+    ) -> tuple[np.ndarray, np.ndarray, list[tuple[int, float]]]:
+        signature_genes = self._signature_genes.get(int(source_cluster))
+        signature_weights = self._signature_weights.get(int(source_cluster))
+        if signature_genes is None or signature_weights is None or signature_genes.size == 0:
+            return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64), []
+        scores = np.zeros(self._active_clusters.size, dtype=np.float64)
+        source_pos = int(self._cluster_lookup[int(source_cluster)]) if int(source_cluster) < self._cluster_lookup.size else -1
+        for gene, source_weight in zip(signature_genes, signature_weights, strict=True):
+            idf = max(float(self._idf_weights[int(gene)]), 0.0)
+            if idf <= 0.0:
+                continue
+            _, positions, counts = self._candidate_cluster_data_for_gene(state, int(gene))
+            if positions.size == 0:
+                continue
+            valid = positions != source_pos
+            if not np.any(valid):
+                continue
+            gene_positions = positions[valid]
+            target_weights = counts[valid].astype(np.float64) * idf
+            scores[gene_positions] += np.minimum(float(source_weight), target_weights)
+        ranked_ids = self._top_cluster_ids_from_scores(scores, limit=self.top_merge_neighbors, exclude_cluster=source_cluster)
+        if not ranked_ids:
+            return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64), []
+        neighbors = np.asarray(ranked_ids, dtype=np.int64)
+        neighbor_positions = self._cluster_lookup[neighbors]
+        neighbor_scores = scores[neighbor_positions]
+        weights = neighbor_scores / neighbor_scores.sum()
+        ranked = [(int(cluster_id), float(score)) for cluster_id, score in zip(neighbors, neighbor_scores, strict=True)]
+        return neighbors, weights, ranked
+
+    def _remove_merge_source(self, source_cluster: int) -> None:
+        source_cluster = int(source_cluster)
+        self._merge_neighbors.pop(source_cluster, None)
+        self._merge_neighbor_weights.pop(source_cluster, None)
+        stale_pairs = [pair for pair in self._merge_pair_scores if source_cluster in pair]
+        for pair in stale_pairs:
+            del self._merge_pair_scores[pair]
+
+    def _rebuild_merge_neighbors(self, state: PartitionState, *, full_rebuild: bool) -> None:
+        active_set = set(int(cluster_id) for cluster_id in self._active_clusters.tolist())
+        stale_sources = set(self._merge_neighbors).difference(active_set)
+        for cluster_id in stale_sources:
+            self._remove_merge_source(int(cluster_id))
+
+        if full_rebuild:
+            sources_to_rebuild = [int(cluster_id) for cluster_id in self._active_clusters.tolist()]
+            self._merge_neighbors = {}
+            self._merge_neighbor_weights = {}
+            self._merge_pair_scores = {}
+        else:
+            impacted_sources = set(int(cluster_id) for cluster_id in self._pending_signature_refresh if int(cluster_id) in active_set)
+            impacted_sources.update(active_set.difference(self._merge_neighbors))
+            for gene in self._pending_gene_refresh:
+                impacted_sources.update(int(cluster_id) for cluster_id in self._signature_gene_sources.get(int(gene), ()))
+                cluster_ids, _, _ = self._candidate_cluster_data_for_gene(state, int(gene))
+                impacted_sources.update(int(cluster_id) for cluster_id in cluster_ids.tolist())
+            sources_to_rebuild = sorted(impacted_sources)
+
+        for cluster_id in sources_to_rebuild:
+            self._remove_merge_source(int(cluster_id))
+            if int(cluster_id) not in active_set:
+                continue
+            neighbors, weights, ranked = self._build_merge_neighbors_for_source(state, int(cluster_id))
+            if neighbors.size == 0:
+                continue
+            self._merge_neighbors[int(cluster_id)] = neighbors
+            self._merge_neighbor_weights[int(cluster_id)] = weights
+            for target_cluster, score in ranked:
+                pair = tuple(sorted((int(cluster_id), int(target_cluster))))
+                self._merge_pair_scores[pair] = self._merge_pair_scores.get(pair, 0.0) + float(score)
+
+        ordered_pairs = sorted(self._merge_pair_scores.items(), key=lambda item: item[1], reverse=True)
+        self._merge_neighbor_sources = (
+            np.asarray(sorted(self._merge_neighbors), dtype=np.int64)
+            if self._merge_neighbors
+            else np.empty(0, dtype=np.int64)
+        )
+        self._deterministic_merge_pairs = [pair for pair, _ in ordered_pairs]
 
     def sample_batch(self, state: PartitionState, n_proposals: int) -> list[Proposal]:
         if n_proposals <= 0:
@@ -356,22 +481,61 @@ class ProposalSampler:
             f"prepare_s={after_prepare - start:.3f} "
             f"merge={int(family_counts[0])} peel={int(family_counts[1])} move={int(family_counts[2])} "
             f"block_peel={int(family_counts[3])} block_move={int(family_counts[4])} "
-            f"deterministic_merge={deterministic_budget}",
+            f"deterministic_merge={deterministic_budget} "
+            f"workers={self.proposal_workers}",
         )
 
+        family_tasks: list[tuple[str, int]] = []
         for family_idx, family_name in enumerate(self.family_names):
             count = int(family_counts[family_idx])
             if family_name == "merge":
                 count = max(0, count - deterministic_budget)
-            family_start = time.perf_counter()
-            family_props = self._sample_family(state, family_name, count)
-            proposals.extend(family_props)
-            family_end = time.perf_counter()
-            self._emit_trace(
-                f"sampler family={family_name} requested={count} produced={len(family_props)} time_s={family_end - family_start:.3f}",
-            )
+            family_tasks.append((family_name, count))
+        if self.proposal_workers > 1 and sum(1 for _, count in family_tasks if count > 0) > 1:
+            seeds = self.rng.integers(np.iinfo(np.int64).max, size=len(family_tasks), dtype=np.int64)
+            max_workers = min(self.proposal_workers, sum(1 for _, count in family_tasks if count > 0))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(
+                        self._sample_family_parallel,
+                        state,
+                        family_name,
+                        count,
+                        int(seed),
+                    )
+                    for (family_name, count), seed in zip(family_tasks, seeds, strict=True)
+                ]
+                results = [future.result() for future in futures]
+            for family_name, count, family_props, elapsed in results:
+                proposals.extend(family_props)
+                self._emit_trace(
+                    f"sampler family={family_name} requested={count} produced={len(family_props)} time_s={elapsed:.3f}",
+                )
+        else:
+            for family_name, count in family_tasks:
+                family_start = time.perf_counter()
+                family_props = self._sample_family(state, family_name, count)
+                proposals.extend(family_props)
+                family_end = time.perf_counter()
+                self._emit_trace(
+                    f"sampler family={family_name} requested={count} produced={len(family_props)} time_s={family_end - family_start:.3f}",
+                )
         self._emit_trace(f"sampler sample_batch done total_props={len(proposals)} total_s={time.perf_counter() - start:.3f}")
         return proposals
+
+    def _sample_family_parallel(
+        self,
+        state: PartitionState,
+        family: str,
+        count: int,
+        seed: int,
+    ) -> tuple[str, int, list[Proposal], float]:
+        worker = copy.copy(self)
+        worker.rng = np.random.default_rng(seed)
+        worker._trace = None
+        start = time.perf_counter()
+        proposals = worker._sample_family(state, family, count)
+        return family, count, proposals, time.perf_counter() - start
 
     def _deterministic_merge_proposals(self, budget: int) -> list[MergeProposal]:
         return [
@@ -422,31 +586,39 @@ class ProposalSampler:
         values: np.ndarray,
         *,
         limit: int | None = None,
+        candidate_targets: np.ndarray | None = None,
     ) -> list[int]:
         self.prepare_round(state)
-        scores: dict[int, float] = defaultdict(float)
+        scores = np.zeros(self._active_clusters.size, dtype=np.float64)
+        candidate_mask = np.zeros(self._active_clusters.size, dtype=bool)
+        if candidate_targets is not None and np.asarray(candidate_targets, dtype=np.int64).size:
+            candidate_targets = np.asarray(candidate_targets, dtype=np.int64)
+            valid = candidate_targets < self._cluster_lookup.size
+            candidate_targets = candidate_targets[valid]
+            candidate_positions = self._cluster_lookup[candidate_targets] if candidate_targets.size else np.empty(0, dtype=np.int64)
+            candidate_positions = candidate_positions[candidate_positions >= 0]
+            if candidate_positions.size:
+                candidate_mask[candidate_positions] = True
+        source_pos = int(self._cluster_lookup[int(source_cluster)]) if int(source_cluster) < self._cluster_lookup.size else -1
         for gene, value in zip(np.asarray(genes, dtype=np.int64), np.asarray(values, dtype=np.int64), strict=True):
-            candidate_clusters = self._candidate_clusters_for_gene(state, int(gene))
-            if candidate_clusters.size == 0:
-                continue
             idf = max(float(self._idf_weights[int(gene)]), 0.0)
             if idf <= 0.0:
                 continue
-            for target_cluster in candidate_clusters:
-                target_cluster = int(target_cluster)
-                if target_cluster == int(source_cluster):
-                    continue
-                target_count = state.clusters[target_cluster].get(int(gene))
-                if target_count <= 0:
-                    continue
-                scores[target_cluster] += min(float(value), float(target_count)) * idf
-        if not scores:
+            _, positions, counts = self._candidate_cluster_data_for_gene(state, int(gene))
+            if positions.size == 0:
+                continue
+            valid_positions = positions != source_pos
+            if candidate_targets is not None:
+                valid_positions &= candidate_mask[positions]
+            if not np.any(valid_positions):
+                continue
+            gene_positions = positions[valid_positions]
+            scores[gene_positions] += np.minimum(float(value), counts[valid_positions].astype(np.float64)) * idf
+        ranked_ids = self._top_cluster_ids_from_scores(scores, limit=limit or self.move_neighbor_limit, exclude_cluster=source_cluster)
+        if not ranked_ids:
             neighbors = self.merge_neighbors_for(int(source_cluster), limit or self.move_neighbor_limit)
             return [int(cluster_id) for cluster_id in neighbors]
-        ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
-        if limit is not None:
-            ranked = ranked[: int(limit)]
-        return [int(cluster_id) for cluster_id, _ in ranked]
+        return ranked_ids
 
     def _sample_merge_uniform(self, state: PartitionState) -> MergeProposal | None:
         del state
@@ -524,7 +696,15 @@ class ProposalSampler:
         _, source_cluster = sampled
         cell = self._sample_low_fit_cell(state, source_cluster)
         genes, values = state.cell_counts(cell)
-        targets = self.rank_target_clusters(state, source_cluster, genes, values, limit=self.move_neighbor_limit)
+        candidate_targets = self._candidate_targets_for_payload(state, source_cluster, genes, values)
+        targets = self.rank_target_clusters(
+            state,
+            source_cluster,
+            genes,
+            values,
+            limit=self.move_neighbor_limit,
+            candidate_targets=candidate_targets,
+        )
         if not targets:
             return self._sample_move_uniform(state)
         target_cluster = int(targets[0] if len(targets) == 1 else self.rng.choice(np.asarray(targets, dtype=np.int64)))
@@ -559,17 +739,51 @@ class ProposalSampler:
         if sampled is None:
             return None
         source_cluster, block = sampled
+        candidate_targets = self._candidate_targets_for_payload(state, source_cluster, block.indices, block.values)
         targets = self.rank_target_clusters(
             state,
             source_cluster,
             block.indices,
             block.values,
             limit=self.move_neighbor_limit,
+            candidate_targets=candidate_targets,
         )
         if not targets:
             return self._sample_block_move_uniform(state)
         target_cluster = int(targets[0] if len(targets) == 1 else self.rng.choice(np.asarray(targets, dtype=np.int64)))
         return BlockMoveProposal(block=block, source_cluster=source_cluster, target_cluster=target_cluster)
+
+    def _candidate_targets_for_payload(
+        self,
+        state: PartitionState,
+        source_cluster: int,
+        genes: np.ndarray,
+        values: np.ndarray,
+    ) -> np.ndarray | None:
+        candidates: list[np.ndarray] = []
+        merge_neighbors = self.merge_neighbors_for(int(source_cluster), self.move_neighbor_limit)
+        if merge_neighbors.size:
+            candidates.append(np.asarray(merge_neighbors, dtype=np.int64))
+        if genes.size:
+            scores = values.astype(np.float64) * np.maximum(self._idf_weights[np.asarray(genes, dtype=np.int64)], 0.0)
+            focus = min(self.move_focus_genes, genes.size)
+            focus_order = np.argsort(scores)[::-1][:focus]
+            for gene in np.asarray(genes, dtype=np.int64)[focus_order]:
+                gene_candidates = self._candidate_clusters_for_gene(state, int(gene))
+                if gene_candidates.size:
+                    candidates.append(np.asarray(gene_candidates[: self.move_candidate_cap_per_gene], dtype=np.int64))
+        if not candidates:
+            return None
+        ordered = np.concatenate(candidates)
+        pooled = np.fromiter(
+            (cluster_id for cluster_id in dict.fromkeys(int(cluster_id) for cluster_id in ordered.tolist()) if cluster_id != int(source_cluster)),
+            dtype=np.int64,
+        )
+        if pooled.size == 0:
+            return None
+        if pooled.size > self.move_candidate_cap_total:
+            pooled = pooled[: self.move_candidate_cap_total]
+        return np.asarray(pooled, dtype=np.int64)
 
     def _sample_block_source(
         self,

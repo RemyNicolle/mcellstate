@@ -28,8 +28,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input-root", type=Path, required=True, help="Root directory containing RNAmatrix*.tsv files.")
     parser.add_argument("--output-root", type=Path, required=True, help="Directory for labels and summary JSON outputs.")
     parser.add_argument("--cache-root", type=Path, default=Path("cache/rnamatrix_npz"), help="Directory for converted NPZ matrices.")
-    parser.add_argument("--preset", choices=("balanced", "gpu", "quality", "benchmark"), default="gpu")
+    parser.add_argument("--preset", choices=("balanced", "cpu", "gpu", "gpu-full", "quality", "benchmark"), default="gpu")
     parser.add_argument("--backend", default="cuda", help="mcellstate backend. Use cuda for GPU.")
+    parser.add_argument("--proposal-workers", type=int, default=None, help="Parallel proposal-family worker count.")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--restarts", type=int, default=1)
     parser.add_argument("--n-proposals", type=int, default=4000)
@@ -115,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
                     str(args.preset),
                     "--backend",
                     str(args.backend),
+                    *([] if args.proposal_workers is None else ["--proposal-workers", str(args.proposal_workers)]),
                     "--seed",
                     str(args.seed),
                     "--restarts",

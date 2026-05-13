@@ -66,6 +66,7 @@ def run_fit(
     *,
     optimizer_mode: str,
     backend: str,
+    proposal_workers: int | None,
     seed: int,
     restarts: int,
     n_proposals: int,
@@ -98,6 +99,7 @@ def run_fit(
         optimizer_mode,
         "--backend",
         backend,
+        *([] if proposal_workers is None else ["--proposal-workers", str(proposal_workers)]),
         "--seed",
         str(seed),
         "--restarts",
@@ -136,10 +138,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--optimizer-mode",
         default="gpu-heavy",
-        choices=("effective", "gpu-heavy"),
-        help="effective keeps the current mixed search; gpu-heavy reduces CPU-heavy refinement phases.",
+        choices=("effective", "gpu-heavy", "gpu-full", "cpu-only"),
+        help="effective keeps the current mixed search; gpu-heavy reduces CPU-heavy refinement phases; gpu-full shifts further toward GPU-scoreable proposals; cpu-only keeps execution on CPU backends.",
     )
     parser.add_argument("--backend", default="cuda", help="mcellstate backend. Use cuda for GPU.")
+    parser.add_argument("--proposal-workers", type=int, default=None, help="Parallel proposal-family worker count.")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--restarts", type=int, default=1)
     parser.add_argument("--n-proposals", type=int, default=4000)
@@ -178,6 +181,7 @@ def main(argv: list[str] | None = None) -> int:
             labels_path,
             optimizer_mode=str(args.optimizer_mode),
             backend=str(args.backend),
+            proposal_workers=None if args.proposal_workers is None else int(args.proposal_workers),
             seed=int(args.seed),
             restarts=int(args.restarts),
             n_proposals=int(args.n_proposals),

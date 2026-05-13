@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 import time
 from typing import TextIO
 
@@ -34,7 +35,9 @@ class FitResult:
 class Optimizer:
     EFFECTIVE_MODE = "effective"
     GPU_HEAVY_MODE = "gpu-heavy"
-    OPTIMIZER_MODES = (EFFECTIVE_MODE, GPU_HEAVY_MODE)
+    GPU_FULL_MODE = "gpu-full"
+    CPU_ONLY_MODE = "cpu-only"
+    OPTIMIZER_MODES = (EFFECTIVE_MODE, GPU_HEAVY_MODE, GPU_FULL_MODE, CPU_ONLY_MODE)
 
     def __init__(
         self,
@@ -63,6 +66,7 @@ class Optimizer:
         signature_pool_size: int = 48,
         block_size_min: int = 2,
         block_size_max: int = 12,
+        proposal_workers: int | None = None,
         validate_batches: bool = True,
         backend_threads: int | None = None,
         staged_search: bool = True,
@@ -101,6 +105,7 @@ class Optimizer:
         self.backend_name = backend
         self.backend_threads = backend_threads
         self.n_proposals = int(n_proposals)
+        self.proposal_workers = None if proposal_workers is None else max(1, int(proposal_workers))
         self.seed = seed
         self.validate_batches = bool(validate_batches)
         self.staged_search = bool(staged_search)
@@ -157,20 +162,31 @@ class Optimizer:
             signature_pool_size=signature_pool_size,
             block_size_min=block_size_min,
             block_size_max=block_size_max,
+            proposal_workers=self.proposal_workers or 1,
             seed=seed,
         )
         self.sampler.set_scoring_context(self.psi)
 
     def _apply_optimizer_mode_defaults(self) -> None:
         if self.optimizer_mode == self.EFFECTIVE_MODE:
+            if self.proposal_workers is None:
+                self.proposal_workers = 1
             return
-        self.full_merge_stage = False
-        self.greedy_merge_sweeps = 0
-        self.exact_cell_reassign_passes = 0
-        self.cluster_reassign_sweeps = 0
-        self.perturb_every = 0
-        self.perturb_steps = 0
-        self.serial_refine_passes = 0
+        if self.optimizer_mode in {self.GPU_HEAVY_MODE, self.GPU_FULL_MODE}:
+            self.full_merge_stage = False
+            self.greedy_merge_sweeps = 0
+            self.exact_cell_reassign_passes = 0
+            self.cluster_reassign_sweeps = 0
+            self.perturb_every = 0
+            self.perturb_steps = 0
+            self.serial_refine_passes = 0
+            if self.proposal_workers is None:
+                self.proposal_workers = max(2, min(8, os.cpu_count() or 2))
+            return
+        if self.optimizer_mode == self.CPU_ONLY_MODE:
+            if self.proposal_workers is None:
+                self.proposal_workers = max(2, min(8, os.cpu_count() or 2))
+            return
 
     def fit(
         self,
@@ -589,6 +605,24 @@ class Optimizer:
         return max(1, min(self.initial_state.n_cells, target))
 
     def _configure_stage(self, state: PartitionState, stage: str) -> None:
+        if self.optimizer_mode == self.GPU_FULL_MODE:
+            self.sampler.set_family_weights(
+                merge=0.78,
+                peel=0.14,
+                move=0.04,
+                block_peel=0.04,
+                block_move=0.0,
+            )
+            return
+        if self.optimizer_mode == self.CPU_ONLY_MODE:
+            self.sampler.set_family_weights(
+                merge=0.42,
+                peel=0.08,
+                move=0.26,
+                block_peel=0.10,
+                block_move=0.14,
+            )
+            return
         if not self.staged_search:
             self.sampler.set_family_weights(**self.base_family_weights)
             return

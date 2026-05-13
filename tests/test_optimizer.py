@@ -190,3 +190,57 @@ def test_gpu_heavy_mode_disables_cpu_heavy_refinement_phases():
     assert optimizer.serial_refine_passes == 0
     assert optimizer.perturb_every == 0
     assert optimizer.perturb_steps == 0
+
+
+def test_gpu_full_mode_shifts_sampling_toward_merge_like_proposals():
+    synthetic = generate_synthetic_dataset(
+        n_clusters=3,
+        cells_per_cluster=6,
+        n_genes=20,
+        marker_strength=28.0,
+        seed=44,
+    )
+    state = PartitionState.from_csr(synthetic.X, init="leiden_overclustered", seed=44, n_clusters=10)
+    psi = make_prior(synthetic.X, tau=1.0)
+
+    optimizer = Optimizer(
+        state=state,
+        psi=psi,
+        optimizer_mode="gpu-full",
+        backend="cpu",
+        n_proposals=200,
+        seed=44,
+    )
+    optimizer._configure_stage(state, "coarsen")
+    weights = dict(zip(optimizer.sampler.family_names, optimizer.sampler.family_weights.tolist(), strict=True))
+
+    assert weights["merge"] > 0.7
+    assert weights["move"] < 0.1
+    assert weights["block_move"] == 0.0
+    assert optimizer.proposal_workers >= 2
+
+
+def test_cpu_only_mode_enables_parallel_proposal_sampling_defaults():
+    synthetic = generate_synthetic_dataset(
+        n_clusters=3,
+        cells_per_cluster=6,
+        n_genes=20,
+        marker_strength=28.0,
+        seed=45,
+    )
+    state = PartitionState.from_csr(synthetic.X, init="leiden_overclustered", seed=45, n_clusters=10)
+    psi = make_prior(synthetic.X, tau=1.0)
+
+    optimizer = Optimizer(
+        state=state,
+        psi=psi,
+        optimizer_mode="cpu-only",
+        backend="cpu",
+        n_proposals=200,
+        seed=45,
+    )
+    optimizer._configure_stage(state, "coarsen")
+    weights = dict(zip(optimizer.sampler.family_names, optimizer.sampler.family_weights.tolist(), strict=True))
+
+    assert optimizer.proposal_workers >= 2
+    assert weights["move"] > weights["peel"]

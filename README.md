@@ -42,6 +42,18 @@ Fit a partition:
 mcellstate fit --input sample.npz --output labels.npy --preset gpu --backend cuda --progress
 ```
 
+Force a CPU-only run with parallel proposal sampling:
+
+```bash
+mcellstate fit --input sample.npz --output labels.npy --preset cpu --proposal-workers 4 --progress
+```
+
+Use the more aggressive GPU-focused mode:
+
+```bash
+mcellstate fit --input sample.npz --output labels.npy --preset gpu-full --backend cuda --proposal-workers 4 --progress
+```
+
 Audit the fitted labels for likely doublets:
 
 ```bash
@@ -55,14 +67,16 @@ python scripts/run_rnamatrix_batch.py \
   --input-root /path/to/Cellstates \
   --output-root /path/to/results \
   --cache-root /path/to/cache \
-  --preset gpu \
+  --preset gpu-full \
   --backend cuda
 ```
 
 ## Presets
 
 - `balanced`: default mixed search strategy
+- `cpu`: CPU-only search with parallel proposal-family sampling
 - `gpu`: minimizes CPU-heavy refinement and favors CUDA scoring
+- `gpu-full`: pushes further toward GPU-scoreable proposal mixes
 - `quality`: more exhaustive refinement
 - `benchmark`: stable settings for comparison runs
 
