@@ -145,7 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--proposal-workers", type=int, default=None, help="Parallel proposal-family worker count.")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--restarts", type=int, default=1)
-    parser.add_argument("--n-proposals", type=int, default=4000)
+    parser.add_argument("--n-proposals", type=int, default=100_000)
     parser.add_argument("--max-rounds", type=int, default=0)
     parser.add_argument("--stall-rounds", type=int, default=1)
     parser.add_argument("--improvement-window", type=int, default=5)

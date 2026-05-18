@@ -103,6 +103,35 @@ def test_torch_cpu_backend_matches_reference_scores():
     assert np.allclose(cpu.score_batch(state, proposals), torch_cpu.score_batch(state, proposals))
 
 
+def test_parallel_cpu_backend_matches_reference_scores():
+    synthetic = generate_synthetic_dataset(
+        n_clusters=3,
+        cells_per_cluster=4,
+        n_genes=12,
+        seed=21,
+    )
+    state = PartitionState.from_csr(
+        synthetic.X,
+        init=np.asarray([0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5]),
+    )
+    psi = np.full(state.n_genes, 0.5, dtype=np.float64)
+    block_01 = BlockPayload.from_cells(state, (0, 1))
+    block_45 = BlockPayload.from_cells(state, (4, 5))
+    proposals = [
+        MergeProposal(0, 1),
+        MergeProposal(2, 3),
+        MoveProposal(cell=0, source_cluster=0, target_cluster=1),
+        MoveProposal(cell=5, source_cluster=2, target_cluster=1),
+        PeelProposal(cell=0, source_cluster=0),
+        BlockPeelProposal(block=block_01, source_cluster=0),
+        BlockMoveProposal(block=block_45, source_cluster=2, target_cluster=1),
+    ]
+
+    cpu = CPUBackend(psi, state, num_threads=1)
+    cpu_parallel = CPUBackend(psi, state, num_threads=2)
+    assert np.allclose(cpu.score_batch(state, proposals), cpu_parallel.score_batch(state, proposals))
+
+
 def test_mps_backend_is_not_supported():
     synthetic = generate_synthetic_dataset(
         n_clusters=2,

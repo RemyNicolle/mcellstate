@@ -86,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     fit.add_argument("--proposal-workers", type=int, default=None, help="Worker count for parallel proposal-family sampling.")
     fit.add_argument("--seed", type=int, default=1, help="Random seed.")
     fit.add_argument("--restarts", type=int, default=1, help="Number of restarts to run.")
-    fit.add_argument("--n-proposals", type=int, default=4000, help="Proposals per optimization round.")
+    fit.add_argument("--n-proposals", type=int, default=100_000, help="Proposals per optimization round.")
     fit.add_argument("--max-rounds", type=int, default=0, help="Use 0 or negative to run until convergence.")
     fit.add_argument("--stall-rounds", type=int, default=1, help="Stop after this many non-improving rounds.")
     fit.add_argument("--improvement-window", type=int, default=5, help="Relative improvement window.")

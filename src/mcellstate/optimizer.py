@@ -186,6 +186,8 @@ class Optimizer:
         if self.optimizer_mode == self.CPU_ONLY_MODE:
             if self.proposal_workers is None:
                 self.proposal_workers = max(2, min(8, os.cpu_count() or 2))
+            if self.backend_threads is None:
+                self.backend_threads = max(2, min(8, os.cpu_count() or 2))
             return
 
     def fit(

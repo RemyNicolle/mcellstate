@@ -111,6 +111,7 @@ class ProposalSampler:
         block_size_min: int = 2,
         block_size_max: int = 12,
         block_candidate_cells: int = 32,
+        low_fit_cache_size: int = 8,
         move_focus_genes: int = 4,
         move_candidate_cap_per_gene: int = 8,
         move_candidate_cap_total: int = 32,
@@ -148,6 +149,7 @@ class ProposalSampler:
         self.block_size_min = int(block_size_min)
         self.block_size_max = int(block_size_max)
         self.block_candidate_cells = int(block_candidate_cells)
+        self.low_fit_cache_size = max(1, int(low_fit_cache_size))
         self.move_focus_genes = int(move_focus_genes)
         self.move_candidate_cap_per_gene = int(move_candidate_cap_per_gene)
         self.move_candidate_cap_total = int(move_candidate_cap_total)
@@ -171,7 +173,8 @@ class ProposalSampler:
         self._merge_pair_scores: dict[tuple[int, int], float] = {}
         self._deterministic_merge_pairs: list[tuple[int, int]] = []
         self._non_singleton_probs = np.empty(0, dtype=np.float64)
-        self._candidate_clusters_cache: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        self._candidate_clusters_cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        self._bad_cell_candidates: dict[int, np.ndarray] = {}
         self._psi: np.ndarray | None = None
         self._trace: Callable[[str], None] | None = None
 
@@ -184,6 +187,14 @@ class ProposalSampler:
     def _emit_trace(self, message: str) -> None:
         if self._trace is not None:
             self._trace(message)
+
+    def _parallel_map(self, items: list, worker):
+        if len(items) <= 1 or self.proposal_workers <= 1:
+            return [worker(item) for item in items]
+        max_workers = min(self.proposal_workers, len(items))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(worker, item) for item in items]
+            return [future.result() for future in futures]
 
     def set_family_weights(self, **weights: float) -> None:
         updated = []
@@ -199,7 +210,6 @@ class ProposalSampler:
         state: PartitionState,
         touched_clusters: set[int] | None = None,
     ) -> None:
-        self._prepared_version = None
         if touched_clusters is None:
             touched_clusters = state.last_touched_clusters
         self._pending_signature_refresh.update(int(cluster_id) for cluster_id in touched_clusters)
@@ -219,7 +229,7 @@ class ProposalSampler:
             self._non_singleton_probs = sizes / total if total > 0.0 else np.full_like(sizes, 1.0 / float(len(sizes)))
         else:
             self._non_singleton_probs = np.empty(0, dtype=np.float64)
-        full_neighbor_rebuild = not self._merge_neighbors or self._prepared_version is None
+        full_neighbor_rebuild = self._prepared_version is None
         if full_neighbor_rebuild:
             self._candidate_clusters_cache = {}
         else:
@@ -228,24 +238,68 @@ class ProposalSampler:
             (len(self._active_clusters) + 1.0) / (state.gene_cluster_counts.astype(np.float64) + 1.0),
         )
         t1 = time.perf_counter()
-        self._refresh_signature_pools(state)
+        self._refresh_bad_cell_cache(state)
         t2 = time.perf_counter()
-        self._refresh_current_signatures(state)
+        self._refresh_signature_pools(state)
         t3 = time.perf_counter()
-        self._rebuild_merge_neighbors(state, full_rebuild=full_neighbor_rebuild)
+        self._refresh_current_signatures(state)
         t4 = time.perf_counter()
+        self._rebuild_merge_neighbors(state, full_rebuild=full_neighbor_rebuild)
+        t5 = time.perf_counter()
         self._prepared_version = state.version
         self._pending_signature_refresh.clear()
         self._pending_gene_refresh.clear()
         self._emit_trace(
             "sampler prepare_round done "
-            f"total_s={t4 - start:.3f} "
+            f"total_s={t5 - start:.3f} "
             f"base_s={t1 - start:.3f} "
-            f"signature_pool_s={t2 - t1:.3f} "
-            f"signature_current_s={t3 - t2:.3f} "
-            f"merge_neighbors_s={t4 - t3:.3f} "
+            f"bad_cell_cache_s={t2 - t1:.3f} "
+            f"signature_pool_s={t3 - t2:.3f} "
+            f"signature_current_s={t4 - t3:.3f} "
+            f"merge_neighbors_s={t5 - t4:.3f} "
             f"active={self._active_clusters.size} non_singletons={self._non_singletons.size}",
         )
+
+    def _refresh_bad_cell_cache(self, state: PartitionState) -> None:
+        active_non_singletons = set(int(cluster_id) for cluster_id in self._non_singletons.tolist())
+        stale_clusters = set(self._bad_cell_candidates).difference(active_non_singletons)
+        for cluster_id in stale_clusters:
+            self._bad_cell_candidates.pop(cluster_id, None)
+        if not active_non_singletons:
+            return
+        if not self._bad_cell_candidates or self._prepared_version is None:
+            refresh_clusters = active_non_singletons
+        else:
+            refresh_clusters = {
+                int(cluster_id)
+                for cluster_id in self._pending_signature_refresh
+                if int(cluster_id) in active_non_singletons
+            }
+            refresh_clusters.update(active_non_singletons.difference(self._bad_cell_candidates))
+        refresh_list = sorted(refresh_clusters)
+        if not refresh_list:
+            return
+        refresh_seeds = self.rng.integers(np.iinfo(np.int64).max, size=len(refresh_list), dtype=np.int64)
+
+        def build_bad_cells(task: tuple[int, int]) -> tuple[int, np.ndarray]:
+            cluster_id, seed = task
+            rng = np.random.default_rng(int(seed))
+            membership = state.cells_by_cluster[int(cluster_id)]
+            candidates = np.asarray(membership.cells, dtype=np.int64)
+            if candidates.size == 0:
+                return int(cluster_id), np.empty(0, dtype=np.int64)
+            sample_size = min(self.block_candidate_cells, len(candidates))
+            sampled = rng.choice(candidates, size=sample_size, replace=False)
+            poor_fit_scores = np.asarray(
+                [self._cell_poor_fit_score(state, int(cluster_id), int(cell)) for cell in sampled],
+                dtype=np.float64,
+            )
+            order = np.argsort(poor_fit_scores)[::-1][: min(self.low_fit_cache_size, sampled.size)]
+            return int(cluster_id), np.asarray(sampled[order], dtype=np.int64)
+
+        tasks = list(zip(refresh_list, refresh_seeds.tolist(), strict=True))
+        for cluster_id, cached_cells in self._parallel_map(tasks, build_bad_cells):
+            self._bad_cell_candidates[int(cluster_id)] = cached_cells
 
     def _refresh_signature_pools(self, state: PartitionState) -> None:
         active_set = set(int(cluster_id) for cluster_id in self._active_clusters.tolist())
@@ -264,29 +318,37 @@ class ProposalSampler:
                 for cluster_id in self._pending_signature_refresh
                 if int(cluster_id) in active_set
             )
-        for cluster_id in refresh_clusters:
+        refresh_list = sorted(int(cluster_id) for cluster_id in refresh_clusters)
+
+        def build_pool(cluster_id: int) -> tuple[int, np.ndarray | None]:
             genes, counts = state.clusters[cluster_id].sorted_items()
             if genes.size == 0:
+                return int(cluster_id), None
+            order = np.argsort(counts)[::-1][: self.signature_pool_size]
+            return int(cluster_id), np.asarray(genes[order], dtype=np.int64)
+
+        for cluster_id, pool in self._parallel_map(refresh_list, build_pool):
+            if pool is None:
                 self._signature_pools.pop(cluster_id, None)
                 continue
-            order = np.argsort(counts)[::-1][: self.signature_pool_size]
-            self._signature_pools[cluster_id] = np.asarray(genes[order], dtype=np.int64)
+            self._signature_pools[cluster_id] = pool
 
     def _refresh_current_signatures(self, state: PartitionState) -> None:
         self._signature_genes = {}
         self._signature_weights = {}
-        signature_gene_sources: dict[int, set[int]] = defaultdict(set)
-        for cluster_id in self._active_clusters.tolist():
+        active_clusters = [int(cluster_id) for cluster_id in self._active_clusters.tolist()]
+
+        def build_signature(cluster_id: int) -> tuple[int, np.ndarray | None, np.ndarray | None]:
             pool = self._signature_pools.get(int(cluster_id))
             if pool is None or pool.size == 0:
-                continue
+                return int(cluster_id), None, None
             pool_counts = state.clusters[int(cluster_id)].get_many(pool).astype(np.float64)
             pool_weights = pool_counts * np.maximum(self._idf_weights[pool], 0.0)
             positive = pool_weights > 0.0
             if not np.any(positive):
                 genes, counts = state.clusters[int(cluster_id)].sorted_items()
                 if genes.size == 0:
-                    continue
+                    return int(cluster_id), None, None
                 order = np.argsort(counts)[::-1][: self.signature_top_genes]
                 chosen_genes = np.asarray(genes[order], dtype=np.int64)
                 chosen_weights = np.asarray(counts[order], dtype=np.float64)
@@ -296,6 +358,12 @@ class ProposalSampler:
                 order = np.argsort(candidate_weights)[::-1][: self.signature_top_genes]
                 chosen_genes = np.asarray(candidate_genes[order], dtype=np.int64)
                 chosen_weights = np.asarray(candidate_weights[order], dtype=np.float64)
+            return int(cluster_id), chosen_genes, chosen_weights
+
+        signature_gene_sources: dict[int, set[int]] = defaultdict(set)
+        for cluster_id, chosen_genes, chosen_weights in self._parallel_map(active_clusters, build_signature):
+            if chosen_genes is None or chosen_weights is None:
+                continue
             self._signature_genes[int(cluster_id)] = chosen_genes
             self._signature_weights[int(cluster_id)] = chosen_weights
             for gene in chosen_genes.tolist():
@@ -321,39 +389,46 @@ class ProposalSampler:
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         cached = self._candidate_clusters_cache.get(int(gene))
         if cached is not None:
-            return cached
-        clusters = state.gene_to_clusters.get(int(gene))
-        if not clusters:
-            result = (
+            cluster_ids, counts = cached
+        else:
+            clusters = state.gene_to_clusters.get(int(gene))
+            if not clusters:
+                result = (
+                    np.empty(0, dtype=np.int64),
+                    np.empty(0, dtype=np.int64),
+                    np.empty(0, dtype=np.int64),
+                )
+                self._candidate_clusters_cache[int(gene)] = (
+                    result[0],
+                    result[2],
+                )
+                return result
+            cluster_ids = np.fromiter((int(cluster_id) for cluster_id in clusters), dtype=np.int64, count=len(clusters))
+            counts = np.asarray([state.clusters[int(cluster_id)].get(int(gene)) for cluster_id in cluster_ids], dtype=np.int64)
+            order = np.argsort(counts)[::-1]
+            cluster_ids = cluster_ids[order]
+            counts = counts[order]
+            if cluster_ids.size > self.merge_gene_cluster_cap:
+                cluster_ids = np.asarray(cluster_ids[: self.merge_gene_cluster_cap], dtype=np.int64)
+                counts = np.asarray(counts[: self.merge_gene_cluster_cap], dtype=np.int64)
+            self._candidate_clusters_cache[int(gene)] = (cluster_ids, counts)
+
+        valid = cluster_ids < self._cluster_lookup.size
+        cluster_ids = cluster_ids[valid]
+        counts = counts[valid]
+        if cluster_ids.size == 0:
+            return (
                 np.empty(0, dtype=np.int64),
                 np.empty(0, dtype=np.int64),
                 np.empty(0, dtype=np.int64),
             )
-            self._candidate_clusters_cache[int(gene)] = result
-            return result
-        cluster_ids = np.fromiter((int(cluster_id) for cluster_id in clusters), dtype=np.int64, count=len(clusters))
-        counts = np.asarray([state.clusters[int(cluster_id)].get(int(gene)) for cluster_id in cluster_ids], dtype=np.int64)
-        order = np.argsort(counts)[::-1]
-        cluster_ids = cluster_ids[order]
-        counts = counts[order]
-        if cluster_ids.size <= self.merge_gene_cluster_cap:
-            truncated_ids = cluster_ids
-            truncated_counts = counts
-        else:
-            truncated_ids = np.asarray(cluster_ids[: self.merge_gene_cluster_cap], dtype=np.int64)
-            truncated_counts = np.asarray(counts[: self.merge_gene_cluster_cap], dtype=np.int64)
-        valid = truncated_ids < self._cluster_lookup.size
-        truncated_ids = truncated_ids[valid]
-        truncated_counts = truncated_counts[valid]
-        positions = self._cluster_lookup[truncated_ids] if truncated_ids.size else np.empty(0, dtype=np.int64)
+        positions = self._cluster_lookup[cluster_ids]
         valid_positions = positions >= 0
-        result = (
-            np.asarray(truncated_ids[valid_positions], dtype=np.int64),
+        return (
+            np.asarray(cluster_ids[valid_positions], dtype=np.int64),
             np.asarray(positions[valid_positions], dtype=np.int64),
-            np.asarray(truncated_counts[valid_positions], dtype=np.int64),
+            np.asarray(counts[valid_positions], dtype=np.int64),
         )
-        self._candidate_clusters_cache[int(gene)] = result
-        return result
 
     def _candidate_clusters_for_gene(self, state: PartitionState, gene: int) -> np.ndarray:
         cluster_ids, _, _ = self._candidate_cluster_data_for_gene(state, gene)
@@ -441,11 +516,17 @@ class ProposalSampler:
                 impacted_sources.update(int(cluster_id) for cluster_id in cluster_ids.tolist())
             sources_to_rebuild = sorted(impacted_sources)
 
-        for cluster_id in sources_to_rebuild:
+        rebuild_list = [int(cluster_id) for cluster_id in sources_to_rebuild]
+        for cluster_id in rebuild_list:
             self._remove_merge_source(int(cluster_id))
+
+        def build_source(cluster_id: int) -> tuple[int, np.ndarray, np.ndarray, list[tuple[int, float]]]:
             if int(cluster_id) not in active_set:
-                continue
+                return int(cluster_id), np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64), []
             neighbors, weights, ranked = self._build_merge_neighbors_for_source(state, int(cluster_id))
+            return int(cluster_id), neighbors, weights, ranked
+
+        for cluster_id, neighbors, weights, ranked in self._parallel_map(rebuild_list, build_source):
             if neighbors.size == 0:
                 continue
             self._merge_neighbors[int(cluster_id)] = neighbors
@@ -491,9 +572,10 @@ class ProposalSampler:
             if family_name == "merge":
                 count = max(0, count - deterministic_budget)
             family_tasks.append((family_name, count))
-        if self.proposal_workers > 1 and sum(1 for _, count in family_tasks if count > 0) > 1:
-            seeds = self.rng.integers(np.iinfo(np.int64).max, size=len(family_tasks), dtype=np.int64)
-            max_workers = min(self.proposal_workers, sum(1 for _, count in family_tasks if count > 0))
+        sub_tasks = self._expand_family_tasks(family_tasks)
+        if self.proposal_workers > 1 and len(sub_tasks) > 1:
+            seeds = self.rng.integers(np.iinfo(np.int64).max, size=len(sub_tasks), dtype=np.int64)
+            max_workers = min(self.proposal_workers, len(sub_tasks))
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = [
                     executor.submit(
@@ -503,13 +585,29 @@ class ProposalSampler:
                         count,
                         int(seed),
                     )
-                    for (family_name, count), seed in zip(family_tasks, seeds, strict=True)
+                    for (family_name, count), seed in zip(sub_tasks, seeds, strict=True)
                 ]
                 results = [future.result() for future in futures]
+            aggregated: dict[str, dict[str, object]] = {}
             for family_name, count, family_props, elapsed in results:
+                record = aggregated.setdefault(
+                    family_name,
+                    {"count": 0, "proposals": [], "elapsed": 0.0},
+                )
+                record["count"] = int(record["count"]) + int(count)
+                record["elapsed"] = float(record["elapsed"]) + float(elapsed)
+                cast_props = record["proposals"]
+                assert isinstance(cast_props, list)
+                cast_props.extend(family_props)
+            for family_name, _ in family_tasks:
+                record = aggregated.get(family_name)
+                if record is None:
+                    continue
+                family_props = record["proposals"]
+                assert isinstance(family_props, list)
                 proposals.extend(family_props)
                 self._emit_trace(
-                    f"sampler family={family_name} requested={count} produced={len(family_props)} time_s={elapsed:.3f}",
+                    f"sampler family={family_name} requested={int(record['count'])} produced={len(family_props)} time_s={float(record['elapsed']):.3f}",
                 )
         else:
             for family_name, count in family_tasks:
@@ -522,6 +620,23 @@ class ProposalSampler:
                 )
         self._emit_trace(f"sampler sample_batch done total_props={len(proposals)} total_s={time.perf_counter() - start:.3f}")
         return proposals
+
+    def _expand_family_tasks(self, family_tasks: list[tuple[str, int]]) -> list[tuple[str, int]]:
+        expanded: list[tuple[str, int]] = []
+        for family_name, count in family_tasks:
+            if count <= 0:
+                continue
+            if family_name not in {"move", "block_move"} or self.proposal_workers <= 1 or count < max(32, self.proposal_workers * 4):
+                expanded.append((family_name, int(count)))
+                continue
+            n_chunks = min(self.proposal_workers, int(count))
+            base = count // n_chunks
+            rem = count % n_chunks
+            for chunk_idx in range(n_chunks):
+                chunk_count = base + (1 if chunk_idx < rem else 0)
+                if chunk_count > 0:
+                    expanded.append((family_name, int(chunk_count)))
+        return expanded
 
     def _sample_family_parallel(
         self,
@@ -546,28 +661,25 @@ class ProposalSampler:
     def _sample_family(self, state: PartitionState, family: str, count: int) -> list[Proposal]:
         sampled: list[Proposal] = []
         for _ in range(count):
-            if family == "merge":
-                uniform_prob = self.merge_uniform_prob
-            elif family == "peel":
-                uniform_prob = self.peel_uniform_prob
-            elif family == "move":
-                uniform_prob = self.move_uniform_prob
-            elif family == "block_peel":
-                uniform_prob = self.block_peel_uniform_prob
-            else:
-                uniform_prob = self.block_move_uniform_prob
-            use_uniform = self.rng.random() < uniform_prob
             proposal: Proposal | None
-            if family == "merge":
-                proposal = self._sample_merge_uniform(state) if use_uniform else self._sample_merge_biased(state)
-            elif family == "peel":
-                proposal = self._sample_peel_uniform(state) if use_uniform else self._sample_peel_biased(state)
-            elif family == "move":
-                proposal = self._sample_move_uniform(state) if use_uniform else self._sample_move_biased(state)
-            elif family == "block_peel":
-                proposal = self._sample_block_peel_uniform(state) if use_uniform else self._sample_block_peel_biased(state)
+            if family == "move":
+                proposal = self._sample_move_uniform(state)
+            elif family == "block_move":
+                proposal = self._sample_block_move_uniform(state)
             else:
-                proposal = self._sample_block_move_uniform(state) if use_uniform else self._sample_block_move_biased(state)
+                if family == "merge":
+                    uniform_prob = self.merge_uniform_prob
+                elif family == "peel":
+                    uniform_prob = self.peel_uniform_prob
+                elif family == "block_peel":
+                    uniform_prob = self.block_peel_uniform_prob
+                else:
+                    raise ValueError(f"unknown proposal family: {family!r}")
+                use_uniform = self.rng.random() < uniform_prob
+                if family == "merge":
+                    proposal = self._sample_merge_uniform(state) if use_uniform else self._sample_merge_biased(state)
+                else:
+                    proposal = self._sample_peel_uniform(state) if use_uniform else self._sample_peel_biased(state)
             if proposal is not None:
                 sampled.append(proposal)
         return sampled
@@ -653,6 +765,13 @@ class ProposalSampler:
         return state.cells_by_cluster[cluster_id].sample(self.rng), cluster_id
 
     def _sample_low_fit_cell(self, state: PartitionState, source_cluster: int) -> int:
+        cached = self._bad_cell_candidates.get(int(source_cluster))
+        if cached is not None and cached.size:
+            if cached.size == 1:
+                return int(cached[0])
+            weights = np.linspace(float(cached.size), 1.0, int(cached.size), dtype=np.float64)
+            weights = weights / weights.sum()
+            return int(self.rng.choice(cached, p=weights))
         membership = state.cells_by_cluster[source_cluster]
         candidates = np.asarray(membership.cells, dtype=np.int64)
         sample_size = min(self.block_candidate_cells, len(candidates))
@@ -688,27 +807,7 @@ class ProposalSampler:
         return MoveProposal(cell=cell, source_cluster=source_cluster, target_cluster=target_cluster)
 
     def _sample_move_biased(self, state: PartitionState) -> MoveProposal | None:
-        if len(self._active_clusters) < 2 or state.n_cells == 0:
-            return None
-        sampled = self._sample_non_singleton_cell(state)
-        if sampled is None:
-            return self._sample_move_uniform(state)
-        _, source_cluster = sampled
-        cell = self._sample_low_fit_cell(state, source_cluster)
-        genes, values = state.cell_counts(cell)
-        candidate_targets = self._candidate_targets_for_payload(state, source_cluster, genes, values)
-        targets = self.rank_target_clusters(
-            state,
-            source_cluster,
-            genes,
-            values,
-            limit=self.move_neighbor_limit,
-            candidate_targets=candidate_targets,
-        )
-        if not targets:
-            return self._sample_move_uniform(state)
-        target_cluster = int(targets[0] if len(targets) == 1 else self.rng.choice(np.asarray(targets, dtype=np.int64)))
-        return MoveProposal(cell=cell, source_cluster=source_cluster, target_cluster=target_cluster)
+        return self._sample_move_uniform(state)
 
     def _sample_block_peel_uniform(self, state: PartitionState) -> BlockPeelProposal | None:
         sampled = self._sample_block_source(state, biased=False)

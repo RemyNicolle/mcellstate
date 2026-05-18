@@ -243,4 +243,5 @@ def test_cpu_only_mode_enables_parallel_proposal_sampling_defaults():
     weights = dict(zip(optimizer.sampler.family_names, optimizer.sampler.family_weights.tolist(), strict=True))
 
     assert optimizer.proposal_workers >= 2
+    assert optimizer.backend_threads >= 2
     assert weights["move"] > weights["peel"]
