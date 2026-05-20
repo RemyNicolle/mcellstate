@@ -3,6 +3,7 @@ from scipy import sparse
 
 from mcellstate.optimizer import Optimizer
 from mcellstate.prior import make_prior
+from mcellstate.proposals import MergeProposal, MoveProposal, PeelProposal
 from mcellstate.state import PartitionState
 from mcellstate.validation import generate_synthetic_dataset, rand_index
 from mcellstate.warm_start import overclustered_leiden_labels
@@ -108,7 +109,9 @@ def test_advanced_search_phases_keep_exact_likelihood_accounting():
         marker_strength=25.0,
         seed=31,
     )
-    state = PartitionState.from_csr(synthetic.X, init="leiden_overclustered", seed=31, n_clusters=8)
+    state = PartitionState.from_csr(
+        synthetic.X, init="leiden_overclustered", seed=31, n_clusters=8
+    )
     psi = make_prior(synthetic.X, tau=1.0)
 
     optimizer = Optimizer(
@@ -143,7 +146,9 @@ def test_optimizer_can_run_until_no_improvement():
         marker_strength=28.0,
         seed=41,
     )
-    state = PartitionState.from_csr(synthetic.X, init="leiden_overclustered", seed=41, n_clusters=10)
+    state = PartitionState.from_csr(
+        synthetic.X, init="leiden_overclustered", seed=41, n_clusters=10
+    )
     psi = make_prior(synthetic.X, tau=1.0)
 
     optimizer = Optimizer(
@@ -160,7 +165,10 @@ def test_optimizer_can_run_until_no_improvement():
 
     assert result.history
     final_round = result.history[-1]
-    assert abs(final_round["log_likelihood_after"] - final_round["log_likelihood_before"]) < 1e-10
+    assert (
+        abs(final_round["log_likelihood_after"] - final_round["log_likelihood_before"])
+        < 1e-10
+    )
 
 
 def test_gpu_heavy_mode_disables_cpu_heavy_refinement_phases():
@@ -171,7 +179,9 @@ def test_gpu_heavy_mode_disables_cpu_heavy_refinement_phases():
         marker_strength=28.0,
         seed=43,
     )
-    state = PartitionState.from_csr(synthetic.X, init="leiden_overclustered", seed=43, n_clusters=10)
+    state = PartitionState.from_csr(
+        synthetic.X, init="leiden_overclustered", seed=43, n_clusters=10
+    )
     psi = make_prior(synthetic.X, tau=1.0)
 
     optimizer = Optimizer(
@@ -190,6 +200,18 @@ def test_gpu_heavy_mode_disables_cpu_heavy_refinement_phases():
     assert optimizer.serial_refine_passes == 0
     assert optimizer.perturb_every == 0
     assert optimizer.perturb_steps == 0
+    assert optimizer.sampler.random_proposals is True
+    assert optimizer.sampler.max_unique_proposals == 200
+    optimizer._configure_stage(state, "coarsen")
+    weights = dict(
+        zip(
+            optimizer.sampler.family_names,
+            optimizer.sampler.family_weights.tolist(),
+            strict=True,
+        )
+    )
+    assert weights["block_peel"] == 0.0
+    assert weights["block_move"] == 0.0
 
 
 def test_gpu_full_mode_shifts_sampling_toward_merge_like_proposals():
@@ -200,7 +222,9 @@ def test_gpu_full_mode_shifts_sampling_toward_merge_like_proposals():
         marker_strength=28.0,
         seed=44,
     )
-    state = PartitionState.from_csr(synthetic.X, init="leiden_overclustered", seed=44, n_clusters=10)
+    state = PartitionState.from_csr(
+        synthetic.X, init="leiden_overclustered", seed=44, n_clusters=10
+    )
     psi = make_prior(synthetic.X, tau=1.0)
 
     optimizer = Optimizer(
@@ -212,12 +236,59 @@ def test_gpu_full_mode_shifts_sampling_toward_merge_like_proposals():
         seed=44,
     )
     optimizer._configure_stage(state, "coarsen")
-    weights = dict(zip(optimizer.sampler.family_names, optimizer.sampler.family_weights.tolist(), strict=True))
+    weights = dict(
+        zip(
+            optimizer.sampler.family_names,
+            optimizer.sampler.family_weights.tolist(),
+            strict=True,
+        )
+    )
 
     assert weights["merge"] > 0.7
     assert weights["move"] < 0.1
+    assert weights["block_peel"] == 0.0
     assert weights["block_move"] == 0.0
     assert optimizer.proposal_workers >= 2
+    assert optimizer.sampler.random_proposals is True
+
+
+def test_random_walk_accepts_finite_bad_non_merge_moves():
+    synthetic = generate_synthetic_dataset(
+        n_clusters=2,
+        cells_per_cluster=3,
+        n_genes=12,
+        marker_strength=28.0,
+        seed=46,
+    )
+    state = PartitionState.from_csr(
+        synthetic.X, init=np.asarray([0, 0, 0, 1, 1, 1], dtype=np.int64)
+    )
+    psi = make_prior(synthetic.X, tau=1.0)
+
+    optimizer = Optimizer(
+        state=state,
+        psi=psi,
+        backend="cpu",
+        n_proposals=16,
+        seed=46,
+        random_accept_prob=1.0,
+        random_accept_max_fraction=1.0,
+        cluster_reassign_sweeps=0,
+        perturb_every=0,
+        serial_refine_passes=0,
+    )
+    proposals = [
+        MergeProposal(0, 1),
+        MoveProposal(cell=0, source_cluster=0, target_cluster=1),
+        PeelProposal(cell=1, source_cluster=0),
+    ]
+    scores = np.asarray([-1.0, -2.0, -3.0], dtype=np.float64)
+
+    accepted = optimizer._select_positive_nonconflicting(proposals, scores)
+
+    assert accepted
+    assert all(item.get("random_walk", False) for item in accepted)
+    assert all(not isinstance(item["proposal"], MergeProposal) for item in accepted)
 
 
 def test_cpu_only_mode_enables_parallel_proposal_sampling_defaults():
@@ -228,7 +299,9 @@ def test_cpu_only_mode_enables_parallel_proposal_sampling_defaults():
         marker_strength=28.0,
         seed=45,
     )
-    state = PartitionState.from_csr(synthetic.X, init="leiden_overclustered", seed=45, n_clusters=10)
+    state = PartitionState.from_csr(
+        synthetic.X, init="leiden_overclustered", seed=45, n_clusters=10
+    )
     psi = make_prior(synthetic.X, tau=1.0)
 
     optimizer = Optimizer(
@@ -240,7 +313,13 @@ def test_cpu_only_mode_enables_parallel_proposal_sampling_defaults():
         seed=45,
     )
     optimizer._configure_stage(state, "coarsen")
-    weights = dict(zip(optimizer.sampler.family_names, optimizer.sampler.family_weights.tolist(), strict=True))
+    weights = dict(
+        zip(
+            optimizer.sampler.family_names,
+            optimizer.sampler.family_weights.tolist(),
+            strict=True,
+        )
+    )
 
     assert optimizer.proposal_workers >= 2
     assert optimizer.backend_threads >= 2

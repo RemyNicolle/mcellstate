@@ -33,23 +33,83 @@ except ImportError:  # pragma: no cover - optional dependency
 _TORCH_CPU_THREADS_CONFIGURED: int | None = None
 
 
+def _proposal_is_valid(state: PartitionState, proposal: Proposal) -> bool:
+    if isinstance(proposal, MergeProposal):
+        return (
+            int(proposal.cluster_a) in state.clusters
+            and int(proposal.cluster_b) in state.clusters
+            and int(proposal.cluster_a) != int(proposal.cluster_b)
+        )
+    if isinstance(proposal, PeelProposal):
+        cell = int(proposal.cell)
+        return (
+            0 <= cell < state.n_cells
+            and int(proposal.source_cluster) in state.clusters
+            and int(state.z[cell]) == int(proposal.source_cluster)
+            and state.cluster_size(int(proposal.source_cluster)) > 1
+        )
+    if isinstance(proposal, MoveProposal):
+        cell = int(proposal.cell)
+        return (
+            0 <= cell < state.n_cells
+            and int(proposal.source_cluster) in state.clusters
+            and int(proposal.target_cluster) in state.clusters
+            and int(proposal.source_cluster) != int(proposal.target_cluster)
+            and int(state.z[cell]) == int(proposal.source_cluster)
+        )
+    if isinstance(proposal, BlockPeelProposal):
+        source_cluster = int(proposal.source_cluster)
+        return (
+            source_cluster in state.clusters
+            and 0 < len(proposal.block.cells) < state.cluster_size(source_cluster)
+            and all(
+                0 <= int(cell) < state.n_cells
+                and int(state.z[int(cell)]) == source_cluster
+                for cell in proposal.block.cells
+            )
+        )
+    if isinstance(proposal, BlockMoveProposal):
+        source_cluster = int(proposal.source_cluster)
+        target_cluster = int(proposal.target_cluster)
+        return (
+            source_cluster in state.clusters
+            and target_cluster in state.clusters
+            and source_cluster != target_cluster
+            and 0 < len(proposal.block.cells) < state.cluster_size(source_cluster)
+            and all(
+                0 <= int(cell) < state.n_cells
+                and int(state.z[int(cell)]) == source_cluster
+                for cell in proposal.block.cells
+            )
+        )
+    return False
+
+
 class CPUBackend:
-    def __init__(self, psi: np.ndarray, state: PartitionState, *, num_threads: int | None = None) -> None:
+    def __init__(
+        self, psi: np.ndarray, state: PartitionState, *, num_threads: int | None = None
+    ) -> None:
         self.psi = np.asarray(psi, dtype=np.float64)
         self.psi0 = float(self.psi.sum())
         self.num_threads = max(1, int(num_threads) if num_threads is not None else 1)
         self.cell_ll = self._precompute_cell_ll(state)
 
-    def _parallel_ranges(self, n_items: int, *, min_items_per_worker: int = 32) -> list[tuple[int, int]]:
+    def _parallel_ranges(
+        self, n_items: int, *, min_items_per_worker: int = 32
+    ) -> list[tuple[int, int]]:
         n_items = int(n_items)
         if self.num_threads <= 1 or n_items <= min_items_per_worker:
             return [(0, n_items)] if n_items > 0 else []
-        max_workers = min(self.num_threads, max(1, n_items // max(1, min_items_per_worker)))
+        max_workers = min(
+            self.num_threads, max(1, n_items // max(1, min_items_per_worker))
+        )
         max_workers = max(1, min(max_workers, n_items))
         if max_workers <= 1:
             return [(0, n_items)]
         chunk = (n_items + max_workers - 1) // max_workers
-        return [(start, min(start + chunk, n_items)) for start in range(0, n_items, chunk)]
+        return [
+            (start, min(start + chunk, n_items)) for start in range(0, n_items, chunk)
+        ]
 
     def _run_parallel_ranges(
         self,
@@ -73,36 +133,57 @@ class CPUBackend:
         def fill_range(start: int, end: int) -> None:
             for cell in range(start, end):
                 indices, counts = state.cell_counts(cell)
-                values[cell] = cluster_log_likelihood_from_sparse(indices, counts, self.psi, psi0=self.psi0)
+                values[cell] = cluster_log_likelihood_from_sparse(
+                    indices, counts, self.psi, psi0=self.psi0
+                )
 
         self._run_parallel_ranges(ranges, fill_range)
         return values
 
-    def score_batch(self, state: PartitionState, proposals: list[Proposal]) -> np.ndarray:
+    def score_batch(
+        self, state: PartitionState, proposals: list[Proposal]
+    ) -> np.ndarray:
         if not proposals:
             return np.empty(0, dtype=np.float64)
+        scores = np.full(len(proposals), -np.inf, dtype=np.float64)
+        valid_items = [
+            (idx, proposal)
+            for idx, proposal in enumerate(proposals)
+            if _proposal_is_valid(state, proposal)
+        ]
+        if not valid_items:
+            return scores
+        valid_indices = [idx for idx, _ in valid_items]
+        valid_proposals = [proposal for _, proposal in valid_items]
         merge_small_ll: dict[int, float] = {}
         merge_cluster_ids = sorted(
             {
                 int(cluster_id)
-                for proposal in proposals
+                for proposal in valid_proposals
                 if isinstance(proposal, MergeProposal)
                 for cluster_id in (proposal.cluster_a, proposal.cluster_b)
             },
         )
         for cluster_id in merge_cluster_ids:
-            merge_small_ll[int(cluster_id)] = state.cluster_log_likelihood_cached(int(cluster_id), self.psi)
+            merge_small_ll[int(cluster_id)] = state.cluster_log_likelihood_cached(
+                int(cluster_id), self.psi
+            )
 
-        scores = np.empty(len(proposals), dtype=np.float64)
-        ranges = self._parallel_ranges(len(proposals), min_items_per_worker=64)
+        ranges = self._parallel_ranges(len(valid_proposals), min_items_per_worker=64)
         if len(ranges) <= 1:
-            for idx, proposal in enumerate(proposals):
-                scores[idx] = self._score_single_proposal(state, proposal, merge_small_ll)
+            for idx, proposal in zip(valid_indices, valid_proposals, strict=True):
+                scores[idx] = self._score_single_proposal(
+                    state, proposal, merge_small_ll
+                )
             return scores
 
         def score_range(start: int, end: int) -> None:
-            for idx in range(start, end):
-                scores[idx] = self._score_single_proposal(state, proposals[idx], merge_small_ll)
+            for local_idx in range(start, end):
+                scores[valid_indices[local_idx]] = self._score_single_proposal(
+                    state,
+                    valid_proposals[local_idx],
+                    merge_small_ll,
+                )
 
         self._run_parallel_ranges(ranges, score_range)
         return scores
@@ -113,50 +194,54 @@ class CPUBackend:
         proposal: Proposal,
         merge_small_ll: dict[int, float],
     ) -> float:
-            if isinstance(proposal, MergeProposal):
-                vector_a = state.clusters[proposal.cluster_a]
-                vector_b = state.clusters[proposal.cluster_b]
-                if vector_a.nnz <= vector_b.nnz:
-                    small, large = vector_a, vector_b
-                else:
-                    small, large = vector_b, vector_a
-                indices, values = small.sorted_items()
-                delta = delta_add_sparse(large, indices, values, self.psi, psi0=self.psi0)
-                delta -= merge_small_ll[proposal.cluster_a if small is vector_a else proposal.cluster_b]
-                return float(delta)
-            elif isinstance(proposal, PeelProposal):
-                return float(delta_peel_cell(state, self.psi, proposal.cell, proposal.source_cluster))
-            elif isinstance(proposal, MoveProposal):
-                return float(
-                    delta_move_cell(
+        if isinstance(proposal, MergeProposal):
+            vector_a = state.clusters[proposal.cluster_a]
+            vector_b = state.clusters[proposal.cluster_b]
+            if vector_a.nnz <= vector_b.nnz:
+                small, large = vector_a, vector_b
+            else:
+                small, large = vector_b, vector_a
+            indices, values = small.sorted_items()
+            delta = delta_add_sparse(large, indices, values, self.psi, psi0=self.psi0)
+            delta -= merge_small_ll[
+                proposal.cluster_a if small is vector_a else proposal.cluster_b
+            ]
+            return float(delta)
+        elif isinstance(proposal, PeelProposal):
+            return float(
+                delta_peel_cell(state, self.psi, proposal.cell, proposal.source_cluster)
+            )
+        elif isinstance(proposal, MoveProposal):
+            return float(
+                delta_move_cell(
                     state,
                     self.psi,
                     proposal.cell,
                     proposal.target_cluster,
                     source_cluster=proposal.source_cluster,
-                    ),
-                )
-            elif isinstance(proposal, BlockPeelProposal):
-                return float(
-                    delta_peel_block(
+                ),
+            )
+        elif isinstance(proposal, BlockPeelProposal):
+            return float(
+                delta_peel_block(
                     state.clusters[proposal.source_cluster],
                     proposal.block.indices,
                     proposal.block.values,
                     self.psi,
-                    ),
-                )
-            elif isinstance(proposal, BlockMoveProposal):
-                return float(
-                    delta_move_block(
+                ),
+            )
+        elif isinstance(proposal, BlockMoveProposal):
+            return float(
+                delta_move_block(
                     state.clusters[proposal.source_cluster],
                     state.clusters[proposal.target_cluster],
                     proposal.block.indices,
                     proposal.block.values,
                     self.psi,
-                    ),
-                )
-            else:  # pragma: no cover - defensive branch
-                raise TypeError(f"unsupported proposal type: {type(proposal)!r}")
+                ),
+            )
+        else:  # pragma: no cover - defensive branch
+            raise TypeError(f"unsupported proposal type: {type(proposal)!r}")
 
 
 class TorchDeviceBackend(CPUBackend):
@@ -179,15 +264,21 @@ class TorchDeviceBackend(CPUBackend):
         super().__init__(psi, state, num_threads=num_threads)
         self.device = torch.device(device)
         self.chunk_size = int(chunk_size)
-        self.psi0_tensor = torch.tensor(self.psi0, dtype=torch.float64, device=self.device)
+        self.psi0_tensor = torch.tensor(
+            self.psi0, dtype=torch.float64, device=self.device
+        )
 
-    def score_batch(self, state: PartitionState, proposals: list[Proposal]) -> np.ndarray:
+    def score_batch(
+        self, state: PartitionState, proposals: list[Proposal]
+    ) -> np.ndarray:
         if not proposals:
             return np.empty(0, dtype=np.float64)
 
-        scores = np.empty(len(proposals), dtype=np.float64)
+        scores = np.full(len(proposals), -np.inf, dtype=np.float64)
         by_type: dict[str, list[tuple[int, Proposal]]] = defaultdict(list)
         for idx, proposal in enumerate(proposals):
+            if not _proposal_is_valid(state, proposal):
+                continue
             by_type[proposal.kind].append((idx, proposal))
 
         for chunk in self._chunked(by_type.get("peel", [])):
@@ -210,10 +301,15 @@ class TorchDeviceBackend(CPUBackend):
         ranges = self._parallel_ranges(n_rows, min_items_per_worker=32)
         self._run_parallel_ranges(ranges, worker)
 
-    def _chunked(self, indexed: list[tuple[int, Proposal]]) -> list[list[tuple[int, Proposal]]]:
+    def _chunked(
+        self, indexed: list[tuple[int, Proposal]]
+    ) -> list[list[tuple[int, Proposal]]]:
         if not indexed:
             return []
-        return [indexed[start : start + self.chunk_size] for start in range(0, len(indexed), self.chunk_size)]
+        return [
+            indexed[start : start + self.chunk_size]
+            for start in range(0, len(indexed), self.chunk_size)
+        ]
 
     def _score_peels(
         self,
@@ -222,12 +318,23 @@ class TorchDeviceBackend(CPUBackend):
         scores: np.ndarray,
     ) -> None:
         batch = [proposal for _, proposal in indexed]
-        lengths = np.asarray([state.cell_nnz[proposal.cell] for proposal in batch], dtype=np.int64)
+        lengths = np.asarray(
+            [state.cell_nnz[proposal.cell] for proposal in batch], dtype=np.int64
+        )
         max_len = int(lengths.max(initial=0))
         if max_len == 0:
             deltas = self._remove_totals_only(
-                np.asarray([state.cluster_total(proposal.source_cluster) for proposal in batch], dtype=np.float64),
-                np.asarray([state.cell_totals[proposal.cell] for proposal in batch], dtype=np.float64),
+                np.asarray(
+                    [
+                        state.cluster_total(proposal.source_cluster)
+                        for proposal in batch
+                    ],
+                    dtype=np.float64,
+                ),
+                np.asarray(
+                    [state.cell_totals[proposal.cell] for proposal in batch],
+                    dtype=np.float64,
+                ),
             )
             deltas += self.cell_ll[[proposal.cell for proposal in batch]]
             for (idx, _), delta in zip(indexed, deltas, strict=True):
@@ -248,13 +355,17 @@ class TorchDeviceBackend(CPUBackend):
                 if length:
                     psi_pad[row, :length] = self.psi[genes]
                     cell_pad[row, :length] = counts
-                    source_pad[row, :length] = state.clusters[proposal.source_cluster].get_many(genes)
+                    source_pad[row, :length] = state.clusters[
+                        proposal.source_cluster
+                    ].get_many(genes)
                 source_totals[row] = state.cluster_total(proposal.source_cluster)
                 cell_totals[row] = state.cell_totals[proposal.cell]
 
         self._fill_rows_parallel(len(batch), fill_rows)
 
-        deltas = self._remove_delta_tensor(source_pad, cell_pad, psi_pad, source_totals, cell_totals)
+        deltas = self._remove_delta_tensor(
+            source_pad, cell_pad, psi_pad, source_totals, cell_totals
+        )
         deltas += self.cell_ll[[proposal.cell for proposal in batch]]
         for (idx, _), delta in zip(indexed, deltas, strict=True):
             scores[idx] = delta
@@ -266,16 +377,36 @@ class TorchDeviceBackend(CPUBackend):
         scores: np.ndarray,
     ) -> None:
         batch = [proposal for _, proposal in indexed]
-        lengths = np.asarray([state.cell_nnz[proposal.cell] for proposal in batch], dtype=np.int64)
+        lengths = np.asarray(
+            [state.cell_nnz[proposal.cell] for proposal in batch], dtype=np.int64
+        )
         max_len = int(lengths.max(initial=0))
         if max_len == 0:
             source_delta = self._remove_totals_only(
-                np.asarray([state.cluster_total(proposal.source_cluster) for proposal in batch], dtype=np.float64),
-                np.asarray([state.cell_totals[proposal.cell] for proposal in batch], dtype=np.float64),
+                np.asarray(
+                    [
+                        state.cluster_total(proposal.source_cluster)
+                        for proposal in batch
+                    ],
+                    dtype=np.float64,
+                ),
+                np.asarray(
+                    [state.cell_totals[proposal.cell] for proposal in batch],
+                    dtype=np.float64,
+                ),
             )
             target_delta = self._add_totals_only(
-                np.asarray([state.cluster_total(proposal.target_cluster) for proposal in batch], dtype=np.float64),
-                np.asarray([state.cell_totals[proposal.cell] for proposal in batch], dtype=np.float64),
+                np.asarray(
+                    [
+                        state.cluster_total(proposal.target_cluster)
+                        for proposal in batch
+                    ],
+                    dtype=np.float64,
+                ),
+                np.asarray(
+                    [state.cell_totals[proposal.cell] for proposal in batch],
+                    dtype=np.float64,
+                ),
             )
             deltas = source_delta + target_delta
             for (idx, _), delta in zip(indexed, deltas, strict=True):
@@ -298,16 +429,24 @@ class TorchDeviceBackend(CPUBackend):
                 if length:
                     psi_pad[row, :length] = self.psi[genes]
                     cell_pad[row, :length] = counts
-                    source_pad[row, :length] = state.clusters[proposal.source_cluster].get_many(genes)
-                    target_pad[row, :length] = state.clusters[proposal.target_cluster].get_many(genes)
+                    source_pad[row, :length] = state.clusters[
+                        proposal.source_cluster
+                    ].get_many(genes)
+                    target_pad[row, :length] = state.clusters[
+                        proposal.target_cluster
+                    ].get_many(genes)
                 source_totals[row] = state.cluster_total(proposal.source_cluster)
                 target_totals[row] = state.cluster_total(proposal.target_cluster)
                 cell_totals[row] = state.cell_totals[proposal.cell]
 
         self._fill_rows_parallel(len(batch), fill_rows)
 
-        deltas = self._remove_delta_tensor(source_pad, cell_pad, psi_pad, source_totals, cell_totals)
-        deltas += self._add_delta_tensor(target_pad, cell_pad, psi_pad, target_totals, cell_totals)
+        deltas = self._remove_delta_tensor(
+            source_pad, cell_pad, psi_pad, source_totals, cell_totals
+        )
+        deltas += self._add_delta_tensor(
+            target_pad, cell_pad, psi_pad, target_totals, cell_totals
+        )
         for (idx, _), delta in zip(indexed, deltas, strict=True):
             scores[idx] = delta
 
@@ -366,7 +505,12 @@ class TorchDeviceBackend(CPUBackend):
 
         self._fill_rows_parallel(len(batch), fill_rows)
 
-        deltas = self._add_delta_tensor(large_pad, small_pad, psi_pad, large_totals, small_totals) - small_ll
+        deltas = (
+            self._add_delta_tensor(
+                large_pad, small_pad, psi_pad, large_totals, small_totals
+            )
+            - small_ll
+        )
         for (idx, _), delta in zip(indexed, deltas, strict=True):
             scores[idx] = delta
 
@@ -380,7 +524,9 @@ class TorchDeviceBackend(CPUBackend):
         block_ll = np.empty(len(batch), dtype=np.float64)
         source_totals = np.empty(len(batch), dtype=np.float64)
         block_totals = np.empty(len(batch), dtype=np.float64)
-        lengths = np.asarray([proposal.block.indices.size for proposal in batch], dtype=np.int64)
+        lengths = np.asarray(
+            [proposal.block.indices.size for proposal in batch], dtype=np.int64
+        )
 
         for row, proposal in enumerate(batch):
             block_ll[row] = cluster_log_likelihood_from_sparse(
@@ -412,11 +558,18 @@ class TorchDeviceBackend(CPUBackend):
                 if length:
                     psi_pad[row, :length] = self.psi[genes]
                     block_pad[row, :length] = counts
-                    source_pad[row, :length] = state.clusters[proposal.source_cluster].get_many(genes)
+                    source_pad[row, :length] = state.clusters[
+                        proposal.source_cluster
+                    ].get_many(genes)
 
         self._fill_rows_parallel(len(batch), fill_rows)
 
-        deltas = self._remove_delta_tensor(source_pad, block_pad, psi_pad, source_totals, block_totals) + block_ll
+        deltas = (
+            self._remove_delta_tensor(
+                source_pad, block_pad, psi_pad, source_totals, block_totals
+            )
+            + block_ll
+        )
         for (idx, _), delta in zip(indexed, deltas, strict=True):
             scores[idx] = delta
 
@@ -430,7 +583,9 @@ class TorchDeviceBackend(CPUBackend):
         source_totals = np.empty(len(batch), dtype=np.float64)
         target_totals = np.empty(len(batch), dtype=np.float64)
         block_totals = np.empty(len(batch), dtype=np.float64)
-        lengths = np.asarray([proposal.block.indices.size for proposal in batch], dtype=np.int64)
+        lengths = np.asarray(
+            [proposal.block.indices.size for proposal in batch], dtype=np.int64
+        )
 
         for row, proposal in enumerate(batch):
             source_totals[row] = state.cluster_total(proposal.source_cluster)
@@ -459,21 +614,37 @@ class TorchDeviceBackend(CPUBackend):
                 if length:
                     psi_pad[row, :length] = self.psi[genes]
                     block_pad[row, :length] = counts
-                    source_pad[row, :length] = state.clusters[proposal.source_cluster].get_many(genes)
-                    target_pad[row, :length] = state.clusters[proposal.target_cluster].get_many(genes)
+                    source_pad[row, :length] = state.clusters[
+                        proposal.source_cluster
+                    ].get_many(genes)
+                    target_pad[row, :length] = state.clusters[
+                        proposal.target_cluster
+                    ].get_many(genes)
 
         self._fill_rows_parallel(len(batch), fill_rows)
 
-        deltas = self._remove_delta_tensor(source_pad, block_pad, psi_pad, source_totals, block_totals)
-        deltas += self._add_delta_tensor(target_pad, block_pad, psi_pad, target_totals, block_totals)
+        deltas = self._remove_delta_tensor(
+            source_pad, block_pad, psi_pad, source_totals, block_totals
+        )
+        deltas += self._add_delta_tensor(
+            target_pad, block_pad, psi_pad, target_totals, block_totals
+        )
         for (idx, _), delta in zip(indexed, deltas, strict=True):
             scores[idx] = delta
 
-    def _remove_totals_only(self, cluster_totals: np.ndarray, remove_totals: np.ndarray) -> np.ndarray:
-        return gammaln_array(cluster_totals + self.psi0) - gammaln_array(cluster_totals - remove_totals + self.psi0)
+    def _remove_totals_only(
+        self, cluster_totals: np.ndarray, remove_totals: np.ndarray
+    ) -> np.ndarray:
+        return gammaln_array(cluster_totals + self.psi0) - gammaln_array(
+            cluster_totals - remove_totals + self.psi0
+        )
 
-    def _add_totals_only(self, cluster_totals: np.ndarray, add_totals: np.ndarray) -> np.ndarray:
-        return gammaln_array(cluster_totals + self.psi0) - gammaln_array(cluster_totals + add_totals + self.psi0)
+    def _add_totals_only(
+        self, cluster_totals: np.ndarray, add_totals: np.ndarray
+    ) -> np.ndarray:
+        return gammaln_array(cluster_totals + self.psi0) - gammaln_array(
+            cluster_totals + add_totals + self.psi0
+        )
 
     def _remove_delta_tensor(
         self,
@@ -483,15 +654,26 @@ class TorchDeviceBackend(CPUBackend):
         cluster_totals: np.ndarray,
         remove_totals: np.ndarray,
     ) -> np.ndarray:
-        cluster_tensor = torch.as_tensor(cluster_pad, dtype=torch.float64, device=self.device)
-        remove_tensor = torch.as_tensor(remove_pad, dtype=torch.float64, device=self.device)
+        cluster_tensor = torch.as_tensor(
+            cluster_pad, dtype=torch.float64, device=self.device
+        )
+        remove_tensor = torch.as_tensor(
+            remove_pad, dtype=torch.float64, device=self.device
+        )
         psi_tensor = torch.as_tensor(psi_pad, dtype=torch.float64, device=self.device)
-        cluster_totals_tensor = torch.as_tensor(cluster_totals, dtype=torch.float64, device=self.device)
-        remove_totals_tensor = torch.as_tensor(remove_totals, dtype=torch.float64, device=self.device)
+        cluster_totals_tensor = torch.as_tensor(
+            cluster_totals, dtype=torch.float64, device=self.device
+        )
+        remove_totals_tensor = torch.as_tensor(
+            remove_totals, dtype=torch.float64, device=self.device
+        )
         delta = torch.lgamma(cluster_totals_tensor + self.psi0_tensor)
-        delta -= torch.lgamma(cluster_totals_tensor - remove_totals_tensor + self.psi0_tensor)
+        delta -= torch.lgamma(
+            cluster_totals_tensor - remove_totals_tensor + self.psi0_tensor
+        )
         delta += torch.sum(
-            torch.lgamma(cluster_tensor - remove_tensor + psi_tensor) - torch.lgamma(cluster_tensor + psi_tensor),
+            torch.lgamma(cluster_tensor - remove_tensor + psi_tensor)
+            - torch.lgamma(cluster_tensor + psi_tensor),
             dim=1,
         )
         return delta.cpu().numpy()
@@ -504,15 +686,24 @@ class TorchDeviceBackend(CPUBackend):
         cluster_totals: np.ndarray,
         add_totals: np.ndarray,
     ) -> np.ndarray:
-        cluster_tensor = torch.as_tensor(cluster_pad, dtype=torch.float64, device=self.device)
+        cluster_tensor = torch.as_tensor(
+            cluster_pad, dtype=torch.float64, device=self.device
+        )
         add_tensor = torch.as_tensor(add_pad, dtype=torch.float64, device=self.device)
         psi_tensor = torch.as_tensor(psi_pad, dtype=torch.float64, device=self.device)
-        cluster_totals_tensor = torch.as_tensor(cluster_totals, dtype=torch.float64, device=self.device)
-        add_totals_tensor = torch.as_tensor(add_totals, dtype=torch.float64, device=self.device)
+        cluster_totals_tensor = torch.as_tensor(
+            cluster_totals, dtype=torch.float64, device=self.device
+        )
+        add_totals_tensor = torch.as_tensor(
+            add_totals, dtype=torch.float64, device=self.device
+        )
         delta = torch.lgamma(cluster_totals_tensor + self.psi0_tensor)
-        delta -= torch.lgamma(cluster_totals_tensor + add_totals_tensor + self.psi0_tensor)
+        delta -= torch.lgamma(
+            cluster_totals_tensor + add_totals_tensor + self.psi0_tensor
+        )
         delta += torch.sum(
-            torch.lgamma(cluster_tensor + add_tensor + psi_tensor) - torch.lgamma(cluster_tensor + psi_tensor),
+            torch.lgamma(cluster_tensor + add_tensor + psi_tensor)
+            - torch.lgamma(cluster_tensor + psi_tensor),
             dim=1,
         )
         return delta.cpu().numpy()
@@ -538,7 +729,10 @@ class TorchCPUBackend(TorchDeviceBackend):
         chunk_size: int = 8192,
         num_threads: int | None = None,
     ) -> None:
-        super().__init__(psi, state, device="cpu", chunk_size=chunk_size, num_threads=num_threads)
+        super().__init__(
+            psi, state, device="cpu", chunk_size=chunk_size, num_threads=num_threads
+        )
+
 
 def make_backend(
     backend: str,

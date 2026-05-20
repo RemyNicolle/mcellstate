@@ -53,14 +53,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    convert = subparsers.add_parser("convert", help="Convert RNAmatrix TSV input to sparse NPZ.")
-    convert.add_argument("--input", required=True, type=Path, help="Input RNAmatrix TSV path.")
-    convert.add_argument("--output", required=True, type=Path, help="Output sparse NPZ path.")
+    convert = subparsers.add_parser(
+        "convert", help="Convert RNAmatrix TSV input to sparse NPZ."
+    )
+    convert.add_argument(
+        "--input", required=True, type=Path, help="Input RNAmatrix TSV path."
+    )
+    convert.add_argument(
+        "--output", required=True, type=Path, help="Output sparse NPZ path."
+    )
 
-    fit = subparsers.add_parser("fit", help="Fit a hard partition from a raw count matrix.")
-    fit.add_argument("--input", required=True, type=Path, help="Input count matrix (.npz, .mtx, or .npy).")
-    fit.add_argument("--output", required=True, type=Path, help="Path to the output labels .npy file.")
-    fit.add_argument("--summary-json", type=Path, default=None, help="Optional JSON summary path.")
+    fit = subparsers.add_parser(
+        "fit", help="Fit a hard partition from a raw count matrix."
+    )
+    fit.add_argument(
+        "--input",
+        required=True,
+        type=Path,
+        help="Input count matrix (.npz, .mtx, or .npy).",
+    )
+    fit.add_argument(
+        "--output",
+        required=True,
+        type=Path,
+        help="Path to the output labels .npy file.",
+    )
+    fit.add_argument(
+        "--summary-json", type=Path, default=None, help="Optional JSON summary path."
+    )
     fit.add_argument(
         "--preset",
         choices=FIT_PRESETS,
@@ -79,35 +99,138 @@ def build_parser() -> argparse.ArgumentParser:
         default="leiden_overclustered",
         help="Initial partition strategy.",
     )
-    fit.add_argument("--n-clusters", type=int, default=None, help="Optional initialization cluster count.")
-    fit.add_argument("--tau", type=float, default=None, help="Dirichlet concentration. Auto if omitted.")
-    fit.add_argument("--backend", default="auto", help="Backend to use: auto, cpu, torch-cpu, or cuda.")
-    fit.add_argument("--threads", type=int, default=None, help="Thread count for CPU torch backends.")
-    fit.add_argument("--proposal-workers", type=int, default=None, help="Worker count for parallel proposal-family sampling.")
+    fit.add_argument(
+        "--n-clusters",
+        type=int,
+        default=None,
+        help="Optional initialization cluster count.",
+    )
+    fit.add_argument(
+        "--tau",
+        type=float,
+        default=None,
+        help="Dirichlet concentration. Auto if omitted.",
+    )
+    fit.add_argument(
+        "--backend",
+        default="auto",
+        help="Backend to use: auto, cpu, torch-cpu, or cuda.",
+    )
+    fit.add_argument(
+        "--threads", type=int, default=None, help="Thread count for CPU torch backends."
+    )
+    fit.add_argument(
+        "--proposal-workers",
+        type=int,
+        default=None,
+        help="Worker count for parallel proposal-family sampling.",
+    )
     fit.add_argument("--seed", type=int, default=1, help="Random seed.")
-    fit.add_argument("--restarts", type=int, default=1, help="Number of restarts to run.")
-    fit.add_argument("--n-proposals", type=int, default=100_000, help="Proposals per optimization round.")
-    fit.add_argument("--max-rounds", type=int, default=0, help="Use 0 or negative to run until convergence.")
-    fit.add_argument("--stall-rounds", type=int, default=1, help="Stop after this many non-improving rounds.")
-    fit.add_argument("--improvement-window", type=int, default=5, help="Relative improvement window.")
-    fit.add_argument("--eta", type=float, default=0.0, help="Relative improvement threshold.")
-    fit.add_argument("--target-clusters", type=int, default=None, help="Optional staged-search target.")
-    fit.add_argument("--validate-batches", action="store_true", help="Validate batch gains exactly.")
-    fit.add_argument("--update-psi", action="store_true", help="Optionally update tau during optimization.")
-    fit.add_argument("--progress", action="store_true", help="Print per-round timing and progress output.")
-    fit.add_argument("--verbose", action="store_true", help="Print every optimizer step as it runs.")
+    fit.add_argument(
+        "--restarts", type=int, default=1, help="Number of restarts to run."
+    )
+    fit.add_argument(
+        "--n-proposals",
+        type=int,
+        default=100_000,
+        help="Proposals per optimization round.",
+    )
+    fit.add_argument(
+        "--max-scored-proposals",
+        type=int,
+        default=None,
+        help="Optional cap after deduplication; GPU modes default to 25000.",
+    )
+    fit.add_argument(
+        "--random-proposals",
+        dest="random_proposals",
+        action="store_true",
+        help="Use cheap uniform proposal sampling and skip guided proposal precomputation.",
+    )
+    fit.add_argument(
+        "--guided-proposals",
+        dest="random_proposals",
+        action="store_false",
+        help="Use guided proposal precomputation even in GPU modes.",
+    )
+    fit.set_defaults(random_proposals=None)
+    fit.add_argument(
+        "--random-accept-prob",
+        type=float,
+        default=None,
+        help="Per-proposal probability for accepting finite non-merge bad moves after positives.",
+    )
+    fit.add_argument(
+        "--random-accept-max-fraction",
+        type=float,
+        default=None,
+        help="Round cap for random-walk bad moves as a fraction of scored proposals.",
+    )
+    fit.add_argument(
+        "--max-rounds",
+        type=int,
+        default=0,
+        help="Use 0 or negative to run until convergence.",
+    )
+    fit.add_argument(
+        "--stall-rounds",
+        type=int,
+        default=1,
+        help="Stop after this many non-improving rounds.",
+    )
+    fit.add_argument(
+        "--improvement-window", type=int, default=5, help="Relative improvement window."
+    )
+    fit.add_argument(
+        "--eta", type=float, default=0.0, help="Relative improvement threshold."
+    )
+    fit.add_argument(
+        "--target-clusters",
+        type=int,
+        default=None,
+        help="Optional staged-search target.",
+    )
+    fit.add_argument(
+        "--validate-batches", action="store_true", help="Validate batch gains exactly."
+    )
+    fit.add_argument(
+        "--update-psi",
+        action="store_true",
+        help="Optionally update tau during optimization.",
+    )
+    fit.add_argument(
+        "--progress",
+        action="store_true",
+        help="Print per-round timing and progress output.",
+    )
+    fit.add_argument(
+        "--verbose", action="store_true", help="Print every optimizer step as it runs."
+    )
 
-    audit = subparsers.add_parser("audit-doublets", help="Audit an existing partition for likely doublets.")
-    audit.add_argument("--input", required=True, type=Path, help="Input count matrix (.npz, .mtx, or .npy).")
-    audit.add_argument("--labels", required=True, type=Path, help="Cluster labels (.npy or text).")
-    audit.add_argument("--output", required=True, type=Path, help="Output cluster table TSV path.")
+    audit = subparsers.add_parser(
+        "audit-doublets", help="Audit an existing partition for likely doublets."
+    )
+    audit.add_argument(
+        "--input",
+        required=True,
+        type=Path,
+        help="Input count matrix (.npz, .mtx, or .npy).",
+    )
+    audit.add_argument(
+        "--labels", required=True, type=Path, help="Cluster labels (.npy or text)."
+    )
+    audit.add_argument(
+        "--output", required=True, type=Path, help="Output cluster table TSV path."
+    )
     audit.add_argument("--tau", type=float, default=1.0, help="Total prior mass.")
     audit.add_argument("--doublet-rate", type=float, default=0.05)
     audit.add_argument("--top-m-parents", type=int, default=50)
     audit.add_argument("--lambda-grid-size", type=int, default=101)
     audit.add_argument("--include-homotypic", action="store_true")
     audit.add_argument("--return-cell-lambda", action="store_true")
-    audit.add_argument("--summary-json", type=Path, default=None, help="Optional JSON summary path.")
+    audit.add_argument(
+        "--summary-json", type=Path, default=None, help="Optional JSON summary path."
+    )
     return parser
 
 
@@ -127,7 +250,11 @@ def run_convert(args: argparse.Namespace) -> dict:
 def run_fit(args: argparse.Namespace) -> dict:
     input_path: Path = args.input
     output_path: Path = args.output
-    summary_path: Path = args.summary_json if args.summary_json is not None else output_path.with_suffix(".json")
+    summary_path: Path = (
+        args.summary_json
+        if args.summary_json is not None
+        else output_path.with_suffix(".json")
+    )
 
     X = load_count_matrix(input_path)
     n_cells = int(X.shape[0])
@@ -137,13 +264,25 @@ def run_fit(args: argparse.Namespace) -> dict:
     preset = resolve_fit_preset(args.preset)
     optimizer_mode = str(args.optimizer_mode or preset["optimizer_mode"])
     effective_backend = str(args.backend)
-    if optimizer_mode == Optimizer.CPU_ONLY_MODE and effective_backend not in {"cpu", "numpy", "torch-cpu", "cpu-torch", "torch"}:
+    if optimizer_mode == Optimizer.CPU_ONLY_MODE and effective_backend not in {
+        "cpu",
+        "numpy",
+        "torch-cpu",
+        "cpu-torch",
+        "torch",
+    }:
         effective_backend = "torch-cpu"
-    target_clusters = int(args.target_clusters) if args.target_clusters is not None else _default_target_clusters(n_cells)
+    target_clusters = (
+        int(args.target_clusters)
+        if args.target_clusters is not None
+        else _default_target_clusters(n_cells)
+    )
     leiden_target = _default_leiden_target(n_cells)
     init_n_clusters = args.n_clusters if args.n_clusters is not None else leiden_target
 
-    state = PartitionState.from_csr(X, init=args.init, seed=args.seed, n_clusters=init_n_clusters)
+    state = PartitionState.from_csr(
+        X, init=args.init, seed=args.seed, n_clusters=init_n_clusters
+    )
     if args.verbose:
         print(
             " ".join(
@@ -156,6 +295,8 @@ def run_fit(args: argparse.Namespace) -> dict:
                     f"n_cells={n_cells}",
                     f"n_genes={int(X.shape[1])}",
                     f"n_proposals={int(args.n_proposals)}",
+                    f"max_scored_proposals={args.max_scored_proposals if args.max_scored_proposals is not None else 'auto'}",
+                    f"random_proposals={args.random_proposals if args.random_proposals is not None else 'auto'}",
                     f"proposal_workers={args.proposal_workers if args.proposal_workers is not None else 'auto'}",
                 ]
             ),
@@ -171,11 +312,20 @@ def run_fit(args: argparse.Namespace) -> dict:
             "backend_threads": args.threads,
             "proposal_workers": args.proposal_workers,
             "n_proposals": args.n_proposals,
+            "max_scored_proposals": args.max_scored_proposals,
+            "random_proposals": args.random_proposals,
+            "random_accept_prob": args.random_accept_prob,
+            "random_accept_max_fraction": args.random_accept_max_fraction,
             "seed": args.seed,
-            "validate_batches": bool(args.validate_batches) or bool(optimizer_kwargs.get("validate_batches", False)),
+            "validate_batches": bool(args.validate_batches)
+            or bool(optimizer_kwargs.get("validate_batches", False)),
             "staged_search": True,
             "target_clusters": target_clusters,
-            "leiden_restart_targets": (leiden_target, min(n_cells, leiden_target * 2), max(16, leiden_target // 2)),
+            "leiden_restart_targets": (
+                leiden_target,
+                min(n_cells, leiden_target * 2),
+                max(16, leiden_target // 2),
+            ),
         }
     )
     optimizer = Optimizer(**optimizer_kwargs)
@@ -213,13 +363,23 @@ def run_fit(args: argparse.Namespace) -> dict:
         "optimizer_mode": optimizer_mode,
         "backend": str(effective_backend),
         "threads": None if args.threads is None else int(args.threads),
-        "proposal_workers": None if args.proposal_workers is None else int(args.proposal_workers),
+        "proposal_workers": None
+        if args.proposal_workers is None
+        else int(args.proposal_workers),
         "seed": int(args.seed),
         "restarts": int(args.restarts),
         "max_rounds": fit_max_rounds,
         "tau": float(tau),
         "init": str(args.init),
         "n_proposals": int(args.n_proposals),
+        "max_scored_proposals": None
+        if optimizer.sampler.max_unique_proposals is None
+        else int(optimizer.sampler.max_unique_proposals),
+        "random_proposals": bool(optimizer.sampler.random_proposals),
+        "random_accept_prob": float(optimizer.random_accept_prob or 0.0),
+        "random_accept_max_fraction": float(
+            optimizer.random_accept_max_fraction or 0.0
+        ),
         "target_clusters": int(target_clusters),
         "validate_batches": bool(args.validate_batches),
         "update_psi": bool(args.update_psi),
@@ -245,7 +405,11 @@ def run_audit_doublets(args: argparse.Namespace) -> dict:
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     result.cluster_table.to_csv(args.output, sep="\t", index=False)
-    summary_path = args.summary_json if args.summary_json is not None else args.output.with_suffix(".json")
+    summary_path = (
+        args.summary_json
+        if args.summary_json is not None
+        else args.output.with_suffix(".json")
+    )
     summary = {
         "status": "completed",
         "input_path": str(args.input),
@@ -253,8 +417,12 @@ def run_audit_doublets(args: argparse.Namespace) -> dict:
         "output_path": str(args.output),
         "summary_json": str(summary_path),
         "n_clusters": int(result.state.n_clusters),
-        "n_likely_doublet": int((result.cluster_table["call"] == "likely_doublet").sum()),
-        "n_possible_doublet": int((result.cluster_table["call"] == "possible_doublet").sum()),
+        "n_likely_doublet": int(
+            (result.cluster_table["call"] == "likely_doublet").sum()
+        ),
+        "n_possible_doublet": int(
+            (result.cluster_table["call"] == "possible_doublet").sum()
+        ),
         "tau": float(args.tau),
         "doublet_rate": float(args.doublet_rate),
     }

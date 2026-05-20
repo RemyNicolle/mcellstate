@@ -100,7 +100,9 @@ def test_torch_cpu_backend_matches_reference_scores():
 
     cpu = CPUBackend(psi, state)
     torch_cpu = TorchCPUBackend(psi, state, num_threads=2)
-    assert np.allclose(cpu.score_batch(state, proposals), torch_cpu.score_batch(state, proposals))
+    assert np.allclose(
+        cpu.score_batch(state, proposals), torch_cpu.score_batch(state, proposals)
+    )
 
 
 def test_parallel_cpu_backend_matches_reference_scores():
@@ -129,7 +131,35 @@ def test_parallel_cpu_backend_matches_reference_scores():
 
     cpu = CPUBackend(psi, state, num_threads=1)
     cpu_parallel = CPUBackend(psi, state, num_threads=2)
-    assert np.allclose(cpu.score_batch(state, proposals), cpu_parallel.score_batch(state, proposals))
+    assert np.allclose(
+        cpu.score_batch(state, proposals), cpu_parallel.score_batch(state, proposals)
+    )
+
+
+def test_backends_mark_stale_proposals_as_negative_infinity():
+    synthetic = generate_synthetic_dataset(
+        n_clusters=2,
+        cells_per_cluster=3,
+        n_genes=10,
+        seed=22,
+    )
+    state = PartitionState.from_csr(
+        synthetic.X,
+        init=np.asarray([0, 0, 0, 1, 1, 1]),
+    )
+    psi = np.full(state.n_genes, 0.5, dtype=np.float64)
+    state.merge_clusters(0, 1)
+    stale = [
+        MergeProposal(0, 1),
+        MoveProposal(cell=0, source_cluster=0, target_cluster=1),
+        PeelProposal(cell=3, source_cluster=1),
+    ]
+
+    cpu = CPUBackend(psi, state)
+    torch_cpu = TorchCPUBackend(psi, state, num_threads=2)
+
+    assert np.all(np.isneginf(cpu.score_batch(state, stale)))
+    assert np.all(np.isneginf(torch_cpu.score_batch(state, stale)))
 
 
 def test_mps_backend_is_not_supported():

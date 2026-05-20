@@ -54,6 +54,8 @@ Use the more aggressive GPU-focused mode:
 mcellstate fit --input sample.npz --output labels.npy --preset gpu-full --backend cuda --proposal-workers 4 --progress
 ```
 
+GPU presets use cheap random proposals by default, skip guided proposal precomputation, disable block proposals, and cap scored proposals at 25,000 per round. Override with `--max-scored-proposals`, or use `--guided-proposals` to restore the guided sampler.
+
 Audit the fitted labels for likely doublets:
 
 ```bash

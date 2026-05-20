@@ -44,7 +44,9 @@ def tsv_to_csr(tsv_path: Path) -> sparse.csr_matrix:
                     vals.append(umi)
             n_genes += 1
 
-    matrix = sparse.csr_matrix((vals, (rows, cols)), shape=(n_cells, n_genes), dtype=np.int64)
+    matrix = sparse.csr_matrix(
+        (vals, (rows, cols)), shape=(n_cells, n_genes), dtype=np.int64
+    )
     matrix.sum_duplicates()
     matrix.sort_indices()
     gene_mask = np.asarray(matrix.sum(axis=0)).ravel() > 0
@@ -70,6 +72,10 @@ def run_fit(
     seed: int,
     restarts: int,
     n_proposals: int,
+    max_scored_proposals: int | None,
+    random_proposals: bool | None,
+    random_accept_prob: float | None,
+    random_accept_max_fraction: float | None,
     max_rounds: int,
     stall_rounds: int,
     improvement_window: int,
@@ -99,13 +105,39 @@ def run_fit(
         optimizer_mode,
         "--backend",
         backend,
-        *([] if proposal_workers is None else ["--proposal-workers", str(proposal_workers)]),
+        *(
+            []
+            if proposal_workers is None
+            else ["--proposal-workers", str(proposal_workers)]
+        ),
         "--seed",
         str(seed),
         "--restarts",
         str(restarts),
         "--n-proposals",
         str(n_proposals),
+        *(
+            []
+            if max_scored_proposals is None
+            else ["--max-scored-proposals", str(max_scored_proposals)]
+        ),
+        *(
+            []
+            if random_proposals is None
+            else (
+                ["--random-proposals"] if random_proposals else ["--guided-proposals"]
+            )
+        ),
+        *(
+            []
+            if random_accept_prob is None
+            else ["--random-accept-prob", str(random_accept_prob)]
+        ),
+        *(
+            []
+            if random_accept_max_fraction is None
+            else ["--random-accept-max-fraction", str(random_accept_max_fraction)]
+        ),
         "--max-rounds",
         str(max_rounds),
         "--stall-rounds",
@@ -127,8 +159,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Convert RNAmatrix TSV files to sparse NPZ and run mcellstate on CUDA.",
     )
-    parser.add_argument("--input-root", type=Path, required=True, help="Root directory containing RNAmatrix*.tsv files.")
-    parser.add_argument("--output-root", type=Path, required=True, help="Directory for labels and summary JSON outputs.")
+    parser.add_argument(
+        "--input-root",
+        type=Path,
+        required=True,
+        help="Root directory containing RNAmatrix*.tsv files.",
+    )
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        required=True,
+        help="Directory for labels and summary JSON outputs.",
+    )
     parser.add_argument(
         "--cache-root",
         type=Path,
@@ -141,21 +183,56 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("effective", "gpu-heavy", "gpu-full", "cpu-only"),
         help="effective keeps the current mixed search; gpu-heavy reduces CPU-heavy refinement phases; gpu-full shifts further toward GPU-scoreable proposals; cpu-only keeps execution on CPU backends.",
     )
-    parser.add_argument("--backend", default="cuda", help="mcellstate backend. Use cuda for GPU.")
-    parser.add_argument("--proposal-workers", type=int, default=None, help="Parallel proposal-family worker count.")
+    parser.add_argument(
+        "--backend", default="cuda", help="mcellstate backend. Use cuda for GPU."
+    )
+    parser.add_argument(
+        "--proposal-workers",
+        type=int,
+        default=None,
+        help="Parallel proposal-family worker count.",
+    )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--restarts", type=int, default=1)
     parser.add_argument("--n-proposals", type=int, default=100_000)
+    parser.add_argument("--max-scored-proposals", type=int, default=None)
+    parser.add_argument(
+        "--random-proposals", dest="random_proposals", action="store_true"
+    )
+    parser.add_argument(
+        "--guided-proposals", dest="random_proposals", action="store_false"
+    )
+    parser.set_defaults(random_proposals=None)
+    parser.add_argument("--random-accept-prob", type=float, default=None)
+    parser.add_argument("--random-accept-max-fraction", type=float, default=None)
     parser.add_argument("--max-rounds", type=int, default=0)
     parser.add_argument("--stall-rounds", type=int, default=1)
     parser.add_argument("--improvement-window", type=int, default=5)
     parser.add_argument("--eta", type=float, default=0.0)
-    parser.add_argument("--progress", dest="progress", action="store_true", help="Print per-round timing output.")
-    parser.add_argument("--no-progress", dest="progress", action="store_false", help="Disable per-round timing output.")
+    parser.add_argument(
+        "--progress",
+        dest="progress",
+        action="store_true",
+        help="Print per-round timing output.",
+    )
+    parser.add_argument(
+        "--no-progress",
+        dest="progress",
+        action="store_false",
+        help="Disable per-round timing output.",
+    )
     parser.set_defaults(progress=True)
-    parser.add_argument("--verbose", action="store_true", help="Print every optimizer step as it runs.")
-    parser.add_argument("--force-convert", action="store_true", help="Rebuild cached NPZ files.")
-    parser.add_argument("--overwrite", action="store_true", help="Rerun fits even if labels and JSON already exist.")
+    parser.add_argument(
+        "--verbose", action="store_true", help="Print every optimizer step as it runs."
+    )
+    parser.add_argument(
+        "--force-convert", action="store_true", help="Rebuild cached NPZ files."
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Rerun fits even if labels and JSON already exist.",
+    )
     return parser
 
 
@@ -175,16 +252,33 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[START] {tsv_path} {start_time.isoformat()}", flush=True)
         convert_to_npz(tsv_path, npz_path, force=bool(args.force_convert))
         end_time = datetime.now()
-        print(f"[END] {tsv_path} {end_time.isoformat()} duration={(end_time - start_time).total_seconds():.2f}s", flush=True)
+        print(
+            f"[END] {tsv_path} {end_time.isoformat()} duration={(end_time - start_time).total_seconds():.2f}s",
+            flush=True,
+        )
         run_fit(
             npz_path,
             labels_path,
             optimizer_mode=str(args.optimizer_mode),
             backend=str(args.backend),
-            proposal_workers=None if args.proposal_workers is None else int(args.proposal_workers),
+            proposal_workers=None
+            if args.proposal_workers is None
+            else int(args.proposal_workers),
             seed=int(args.seed),
             restarts=int(args.restarts),
             n_proposals=int(args.n_proposals),
+            max_scored_proposals=None
+            if args.max_scored_proposals is None
+            else int(args.max_scored_proposals),
+            random_proposals=args.random_proposals,
+            random_accept_prob=None
+            if args.random_accept_prob is None
+            else float(args.random_accept_prob),
+            random_accept_max_fraction=(
+                None
+                if args.random_accept_max_fraction is None
+                else float(args.random_accept_max_fraction)
+            ),
             max_rounds=int(args.max_rounds),
             stall_rounds=int(args.stall_rounds),
             improvement_window=int(args.improvement_window),

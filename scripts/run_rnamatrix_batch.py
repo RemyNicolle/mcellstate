@@ -24,25 +24,79 @@ def _with_progress(args: argparse.Namespace, cmd: list[str]) -> list[str]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Convert RNAmatrix TSV files and fit mcellstate in batch.")
-    parser.add_argument("--input-root", type=Path, required=True, help="Root directory containing RNAmatrix*.tsv files.")
-    parser.add_argument("--output-root", type=Path, required=True, help="Directory for labels and summary JSON outputs.")
-    parser.add_argument("--cache-root", type=Path, default=Path("cache/rnamatrix_npz"), help="Directory for converted NPZ matrices.")
-    parser.add_argument("--preset", choices=("balanced", "cpu", "gpu", "gpu-full", "quality", "benchmark"), default="gpu")
-    parser.add_argument("--backend", default="cuda", help="mcellstate backend. Use cuda for GPU.")
-    parser.add_argument("--proposal-workers", type=int, default=None, help="Parallel proposal-family worker count.")
+    parser = argparse.ArgumentParser(
+        description="Convert RNAmatrix TSV files and fit mcellstate in batch."
+    )
+    parser.add_argument(
+        "--input-root",
+        type=Path,
+        required=True,
+        help="Root directory containing RNAmatrix*.tsv files.",
+    )
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        required=True,
+        help="Directory for labels and summary JSON outputs.",
+    )
+    parser.add_argument(
+        "--cache-root",
+        type=Path,
+        default=Path("cache/rnamatrix_npz"),
+        help="Directory for converted NPZ matrices.",
+    )
+    parser.add_argument(
+        "--preset",
+        choices=("balanced", "cpu", "gpu", "gpu-full", "quality", "benchmark"),
+        default="gpu",
+    )
+    parser.add_argument(
+        "--backend", default="cuda", help="mcellstate backend. Use cuda for GPU."
+    )
+    parser.add_argument(
+        "--proposal-workers",
+        type=int,
+        default=None,
+        help="Parallel proposal-family worker count.",
+    )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--restarts", type=int, default=1)
     parser.add_argument("--n-proposals", type=int, default=100_000)
+    parser.add_argument("--max-scored-proposals", type=int, default=None)
+    parser.add_argument(
+        "--random-proposals", dest="random_proposals", action="store_true"
+    )
+    parser.add_argument(
+        "--guided-proposals", dest="random_proposals", action="store_false"
+    )
+    parser.set_defaults(random_proposals=None)
+    parser.add_argument("--random-accept-prob", type=float, default=None)
+    parser.add_argument("--random-accept-max-fraction", type=float, default=None)
     parser.add_argument("--max-rounds", type=int, default=0)
     parser.add_argument("--stall-rounds", type=int, default=1)
     parser.add_argument("--improvement-window", type=int, default=5)
     parser.add_argument("--eta", type=float, default=0.0)
-    parser.add_argument("--progress", dest="progress", action="store_true", help="Print per-round timing output.")
-    parser.add_argument("--no-progress", dest="progress", action="store_false", help="Disable per-round timing output.")
+    parser.add_argument(
+        "--progress",
+        dest="progress",
+        action="store_true",
+        help="Print per-round timing output.",
+    )
+    parser.add_argument(
+        "--no-progress",
+        dest="progress",
+        action="store_false",
+        help="Disable per-round timing output.",
+    )
     parser.set_defaults(progress=True)
-    parser.add_argument("--verbose", action="store_true", help="Print every optimizer step as it runs.")
-    parser.add_argument("--overwrite", action="store_true", help="Rerun fits even if labels and JSON already exist.")
+    parser.add_argument(
+        "--verbose", action="store_true", help="Print every optimizer step as it runs."
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Rerun fits even if labels and JSON already exist.",
+    )
     return parser
 
 
@@ -116,13 +170,44 @@ def main(argv: list[str] | None = None) -> int:
                     str(args.preset),
                     "--backend",
                     str(args.backend),
-                    *([] if args.proposal_workers is None else ["--proposal-workers", str(args.proposal_workers)]),
+                    *(
+                        []
+                        if args.proposal_workers is None
+                        else ["--proposal-workers", str(args.proposal_workers)]
+                    ),
                     "--seed",
                     str(args.seed),
                     "--restarts",
                     str(args.restarts),
                     "--n-proposals",
                     str(args.n_proposals),
+                    *(
+                        []
+                        if args.max_scored_proposals is None
+                        else ["--max-scored-proposals", str(args.max_scored_proposals)]
+                    ),
+                    *(
+                        []
+                        if args.random_proposals is None
+                        else (
+                            ["--random-proposals"]
+                            if args.random_proposals
+                            else ["--guided-proposals"]
+                        )
+                    ),
+                    *(
+                        []
+                        if args.random_accept_prob is None
+                        else ["--random-accept-prob", str(args.random_accept_prob)]
+                    ),
+                    *(
+                        []
+                        if args.random_accept_max_fraction is None
+                        else [
+                            "--random-accept-max-fraction",
+                            str(args.random_accept_max_fraction),
+                        ]
+                    ),
                     "--max-rounds",
                     str(args.max_rounds),
                     "--stall-rounds",

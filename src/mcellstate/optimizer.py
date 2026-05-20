@@ -93,6 +93,10 @@ class Optimizer:
         serial_refine_merge_candidates: int = 3,
         serial_refine_move_candidates: int = 2,
         serial_refine_cells_per_cluster: int = 6,
+        random_proposals: bool | None = None,
+        max_scored_proposals: int | None = None,
+        random_accept_prob: float | None = None,
+        random_accept_max_fraction: float | None = None,
     ) -> None:
         optimizer_mode = str(optimizer_mode).lower()
         if optimizer_mode not in self.OPTIMIZER_MODES:
@@ -105,13 +109,17 @@ class Optimizer:
         self.backend_name = backend
         self.backend_threads = backend_threads
         self.n_proposals = int(n_proposals)
-        self.proposal_workers = None if proposal_workers is None else max(1, int(proposal_workers))
+        self.proposal_workers = (
+            None if proposal_workers is None else max(1, int(proposal_workers))
+        )
         self.seed = seed
         self.validate_batches = bool(validate_batches)
         self.staged_search = bool(staged_search)
         self.target_clusters = None if target_clusters is None else int(target_clusters)
         self.leiden_restart_targets = (
-            None if leiden_restart_targets is None else tuple(int(value) for value in leiden_restart_targets)
+            None
+            if leiden_restart_targets is None
+            else tuple(int(value) for value in leiden_restart_targets)
         )
         self.full_merge_stage = bool(full_merge_stage)
         self.full_merge_active_limit = int(full_merge_active_limit)
@@ -134,6 +142,22 @@ class Optimizer:
         self.serial_refine_merge_candidates = int(serial_refine_merge_candidates)
         self.serial_refine_move_candidates = int(serial_refine_move_candidates)
         self.serial_refine_cells_per_cluster = int(serial_refine_cells_per_cluster)
+        self.random_proposals = (
+            None if random_proposals is None else bool(random_proposals)
+        )
+        self.max_scored_proposals = (
+            None
+            if max_scored_proposals is None or int(max_scored_proposals) <= 0
+            else int(max_scored_proposals)
+        )
+        self.random_accept_prob = (
+            None if random_accept_prob is None else max(0.0, float(random_accept_prob))
+        )
+        self.random_accept_max_fraction = (
+            None
+            if random_accept_max_fraction is None
+            else max(0.0, float(random_accept_max_fraction))
+        )
         self._apply_optimizer_mode_defaults()
         self.rng = np.random.default_rng(seed)
         self.base_family_weights = {
@@ -163,6 +187,8 @@ class Optimizer:
             block_size_min=block_size_min,
             block_size_max=block_size_max,
             proposal_workers=self.proposal_workers or 1,
+            random_proposals=bool(self.random_proposals),
+            max_unique_proposals=self.max_scored_proposals,
             seed=seed,
         )
         self.sampler.set_scoring_context(self.psi)
@@ -171,6 +197,12 @@ class Optimizer:
         if self.optimizer_mode == self.EFFECTIVE_MODE:
             if self.proposal_workers is None:
                 self.proposal_workers = 1
+            if self.random_proposals is None:
+                self.random_proposals = False
+            if self.random_accept_prob is None:
+                self.random_accept_prob = 0.0
+            if self.random_accept_max_fraction is None:
+                self.random_accept_max_fraction = 0.0
             return
         if self.optimizer_mode in {self.GPU_HEAVY_MODE, self.GPU_FULL_MODE}:
             self.full_merge_stage = False
@@ -182,12 +214,26 @@ class Optimizer:
             self.serial_refine_passes = 0
             if self.proposal_workers is None:
                 self.proposal_workers = max(2, min(8, os.cpu_count() or 2))
+            if self.random_proposals is None:
+                self.random_proposals = True
+            if self.max_scored_proposals is None:
+                self.max_scored_proposals = min(self.n_proposals, 25_000)
+            if self.random_accept_prob is None:
+                self.random_accept_prob = 0.002
+            if self.random_accept_max_fraction is None:
+                self.random_accept_max_fraction = 0.002
             return
         if self.optimizer_mode == self.CPU_ONLY_MODE:
             if self.proposal_workers is None:
                 self.proposal_workers = max(2, min(8, os.cpu_count() or 2))
             if self.backend_threads is None:
                 self.backend_threads = max(2, min(8, os.cpu_count() or 2))
+            if self.random_proposals is None:
+                self.random_proposals = False
+            if self.random_accept_prob is None:
+                self.random_accept_prob = 0.0
+            if self.random_accept_max_fraction is None:
+                self.random_accept_max_fraction = 0.0
             return
 
     def fit(
@@ -216,11 +262,17 @@ class Optimizer:
             state.initialize_likelihood_cache(psi)
             self.sampler.notify_state_changed(state, set(state.active_cluster_ids))
             self.sampler.set_trace(
-                (lambda message, restart=restart, stream=verbose_stream: self._emit_sampler_trace(stream=stream, restart=restart, message=message))
+                (
+                    lambda message, restart=restart, stream=verbose_stream: self._emit_sampler_trace(
+                        stream=stream, restart=restart, message=message
+                    )
+                )
                 if verbose
                 else None
             )
-            backend = make_backend(self.backend_name, psi, state, num_threads=self.backend_threads)
+            backend = make_backend(
+                self.backend_name, psi, state, num_threads=self.backend_threads
+            )
             history: list[dict] = []
             current_ll = state.total_log_likelihood_cached(psi)
             stall = 0
@@ -255,7 +307,13 @@ class Optimizer:
 
                 timer = time.perf_counter()
                 if verbose:
-                    self._emit_verbose(stream=verbose_stream, restart=restart, round_idx=round_idx, stage=stage, message="full merge phase")
+                    self._emit_verbose(
+                        stream=verbose_stream,
+                        restart=restart,
+                        round_idx=round_idx,
+                        stage=stage,
+                        message="full merge phase",
+                    )
                 full_merge = self._full_merge_phase(state, backend, stage=stage)
                 timing["full_merge_s"] = time.perf_counter() - timer
                 if full_merge["delta"] != 0.0:
@@ -270,14 +328,22 @@ class Optimizer:
                         stage=stage,
                         message="exact cell reassignment phase",
                     )
-                exact_cell_reassign = self._exact_cell_reassignment_sweep(state, backend, stage=stage)
+                exact_cell_reassign = self._exact_cell_reassignment_sweep(
+                    state, backend, stage=stage
+                )
                 timing["exact_cell_reassign_s"] = time.perf_counter() - timer
                 if exact_cell_reassign["delta"] != 0.0:
                     current_ll = full_partition_log_likelihood(state, psi)
 
                 timer = time.perf_counter()
                 if verbose:
-                    self._emit_verbose(stream=verbose_stream, restart=restart, round_idx=round_idx, stage=stage, message="greedy merge phase")
+                    self._emit_verbose(
+                        stream=verbose_stream,
+                        restart=restart,
+                        round_idx=round_idx,
+                        stage=stage,
+                        message="greedy merge phase",
+                    )
                 greedy_merge = self._greedy_merge_sweep(state, backend, stage=stage)
                 timing["greedy_merge_s"] = time.perf_counter() - timer
                 if greedy_merge["delta"] != 0.0:
@@ -312,29 +378,43 @@ class Optimizer:
                         restart=restart,
                         round_idx=round_idx,
                         stage=stage,
-                        message="select non-conflicting positives",
+                        message="select non-conflicting proposals",
                     )
                 accepted = self._select_positive_nonconflicting(proposals, scores)
                 timing["conflict_s"] = time.perf_counter() - timer
                 accepted_delta = float(sum(item["delta"] for item in accepted))
+                random_walk_accepted = int(
+                    sum(1 for item in accepted if item.get("random_walk", False))
+                )
+                accepted_positive_steps = int(
+                    sum(1 for item in accepted if float(item["delta"]) > 0.0)
+                )
 
                 round_record = {
                     "restart": restart,
                     "round": round_idx,
                     "stage": stage,
                     "family_weights": dict(
-                        zip(self.sampler.family_names, self.sampler.family_weights.tolist(), strict=True),
+                        zip(
+                            self.sampler.family_names,
+                            self.sampler.family_weights.tolist(),
+                            strict=True,
+                        ),
                     ),
                     "n_proposals": len(proposals),
                     "n_positive": int(np.sum(scores > 0.0)),
                     "n_accepted": len(accepted),
+                    "n_random_walk": random_walk_accepted,
                     "full_merge": full_merge,
                     "exact_cell_reassign": exact_cell_reassign,
                     "greedy_merge": greedy_merge,
                     "accepted_delta": accepted_delta,
                     "log_likelihood_before": round_before_ll,
                     "touch_sets": [sorted(item["touch_set"]) for item in accepted],
-                    "operations": [self._proposal_to_record(item["proposal"], item["delta"]) for item in accepted],
+                    "operations": [
+                        self._proposal_to_record(item["proposal"], item["delta"])
+                        for item in accepted
+                    ],
                 }
 
                 timer = time.perf_counter()
@@ -355,8 +435,16 @@ class Optimizer:
 
                 timer = time.perf_counter()
                 if verbose:
-                    self._emit_verbose(stream=verbose_stream, restart=restart, round_idx=round_idx, stage=stage, message="serial refine phase")
-                refinement = self._serial_refine(state, psi, backend, touched_clusters, stage)
+                    self._emit_verbose(
+                        stream=verbose_stream,
+                        restart=restart,
+                        round_idx=round_idx,
+                        stage=stage,
+                        message="serial refine phase",
+                    )
+                refinement = self._serial_refine(
+                    state, psi, backend, touched_clusters, stage
+                )
                 timing["serial_refine_s"] = time.perf_counter() - timer
                 if refinement["delta"] != 0.0:
                     current_ll = full_partition_log_likelihood(state, psi)
@@ -370,15 +458,25 @@ class Optimizer:
                         stage=stage,
                         message="cluster reassignment phase",
                     )
-                cluster_reassign = self._cluster_reassignment_sweep(state, backend, stage=stage)
+                cluster_reassign = self._cluster_reassignment_sweep(
+                    state, backend, stage=stage
+                )
                 timing["cluster_reassign_s"] = time.perf_counter() - timer
                 if cluster_reassign["delta"] != 0.0:
                     current_ll = full_partition_log_likelihood(state, psi)
 
                 timer = time.perf_counter()
                 if verbose:
-                    self._emit_verbose(stream=verbose_stream, restart=restart, round_idx=round_idx, stage=stage, message="perturbation phase")
-                perturbation = self._perturbation_phase(state, backend, round_idx, stage)
+                    self._emit_verbose(
+                        stream=verbose_stream,
+                        restart=restart,
+                        round_idx=round_idx,
+                        stage=stage,
+                        message="perturbation phase",
+                    )
+                perturbation = self._perturbation_phase(
+                    state, backend, round_idx, stage
+                )
                 timing["perturbation_s"] = time.perf_counter() - timer
                 if perturbation["delta"] != 0.0:
                     current_ll = full_partition_log_likelihood(state, psi)
@@ -405,7 +503,9 @@ class Optimizer:
                     observed_delta = after_partition_ll - round_before_ll
                     expected_total_delta = total_delta
                     delta_error = abs(observed_delta - expected_total_delta)
-                    delta_tolerance = 1e-8 * max(1.0, abs(observed_delta), abs(expected_total_delta))
+                    delta_tolerance = 1e-8 * max(
+                        1.0, abs(observed_delta), abs(expected_total_delta)
+                    )
                     if delta_error > delta_tolerance:
                         raise AssertionError(
                             "batch likelihood gain mismatch: "
@@ -421,7 +521,9 @@ class Optimizer:
                     old_ll = current_ll
                     _, psi, current_ll = optimize_tau(state, psi)
                     state.initialize_likelihood_cache(psi)
-                    backend = make_backend(self.backend_name, psi, state, num_threads=self.backend_threads)
+                    backend = make_backend(
+                        self.backend_name, psi, state, num_threads=self.backend_threads
+                    )
                     self.sampler.set_scoring_context(psi)
                     tau_update = {"updated": True, "delta": float(current_ll - old_ll)}
                     timing["tau_update_s"] = time.perf_counter() - timer
@@ -452,7 +554,8 @@ class Optimizer:
                     int(full_merge["n_steps"])
                     + int(exact_cell_reassign["n_steps"])
                     + int(greedy_merge["n_steps"])
-                    + len(accepted)
+                    + accepted_positive_steps
+                    + random_walk_accepted
                     + int(refinement["n_steps"])
                     + int(cluster_reassign["n_steps"])
                     + int(perturbation.get("positive_cleanup_steps", 0))
@@ -461,7 +564,9 @@ class Optimizer:
                 if stall >= stall_rounds:
                     break
 
-                if self._relative_improvement_below_threshold(history, improvement_window, eta):
+                if self._relative_improvement_below_threshold(
+                    history, improvement_window, eta
+                ):
                     break
                 round_idx += 1
 
@@ -473,8 +578,13 @@ class Optimizer:
                 psi=psi.copy(),
                 restart_summaries=None,
             )
-            histories.append({"restart": restart, "history": history, "log_likelihood": current_ll})
-            if best_result is None or result.log_likelihood > best_result.log_likelihood:
+            histories.append(
+                {"restart": restart, "history": history, "log_likelihood": current_ll}
+            )
+            if (
+                best_result is None
+                or result.log_likelihood > best_result.log_likelihood
+            ):
                 best_result = result
 
         if best_result is None:  # pragma: no cover - defensive branch
@@ -512,6 +622,7 @@ class Optimizer:
             f"ll_after={round_record.get('log_likelihood_after'):.3f}",
             f"accepted={round_record.get('n_accepted')}",
             f"positive={round_record.get('n_positive')}",
+            f"random_walk={round_record.get('n_random_walk', 0)}",
             f"timing_s={total_timing:.3f}",
         ]
         for key in (
@@ -547,7 +658,11 @@ class Optimizer:
         import sys
 
         out = stream or sys.stdout
-        print(f"[trace] restart={restart} round={round_idx} stage={stage} {message}", file=out, flush=True)
+        print(
+            f"[trace] restart={restart} round={round_idx} stage={stage} {message}",
+            file=out,
+            flush=True,
+        )
 
     def _emit_sampler_trace(
         self,
@@ -597,7 +712,11 @@ class Optimizer:
 
     def _restart_target_clusters(self, restart: int) -> int | None:
         if self.leiden_restart_targets:
-            return int(self.leiden_restart_targets[(restart - 1) % len(self.leiden_restart_targets)])
+            return int(
+                self.leiden_restart_targets[
+                    (restart - 1) % len(self.leiden_restart_targets)
+                ]
+            )
         if self.target_clusters is not None:
             base = max(1, int(self.target_clusters))
         else:
@@ -609,12 +728,15 @@ class Optimizer:
     def _configure_stage(self, state: PartitionState, stage: str) -> None:
         if self.optimizer_mode == self.GPU_FULL_MODE:
             self.sampler.set_family_weights(
-                merge=0.78,
-                peel=0.14,
-                move=0.04,
-                block_peel=0.04,
+                merge=0.86,
+                peel=0.09,
+                move=0.05,
+                block_peel=0.0,
                 block_move=0.0,
             )
+            return
+        if self.optimizer_mode == self.GPU_HEAVY_MODE:
+            self.sampler.set_family_weights(**self._gpu_heavy_stage_weights(stage))
             return
         if self.optimizer_mode == self.CPU_ONLY_MODE:
             self.sampler.set_family_weights(
@@ -630,6 +752,31 @@ class Optimizer:
             return
         del state
         self.sampler.set_family_weights(**self._stage_weights(stage))
+
+    def _gpu_heavy_stage_weights(self, stage: str) -> dict[str, float]:
+        if stage == "coarsen":
+            return {
+                "merge": 0.75,
+                "peel": 0.05,
+                "move": 0.20,
+                "block_peel": 0.0,
+                "block_move": 0.0,
+            }
+        if stage == "balanced":
+            return {
+                "merge": 0.55,
+                "peel": 0.10,
+                "move": 0.35,
+                "block_peel": 0.0,
+                "block_move": 0.0,
+            }
+        return {
+            "merge": 0.35,
+            "peel": 0.10,
+            "move": 0.55,
+            "block_peel": 0.0,
+            "block_move": 0.0,
+        }
 
     def _stage_name(self, state: PartitionState) -> str:
         active = len(state.active_cluster_ids)
@@ -677,17 +824,65 @@ class Optimizer:
         scores: np.ndarray,
     ) -> list[dict]:
         candidates = self._positive_candidates(proposals, scores)
+        candidates.extend(self._random_walk_candidates(proposals, scores))
         return self._select_positive_nonconflicting_candidates(candidates)
 
-    def _positive_candidates(self, proposals: list[Proposal], scores: np.ndarray) -> list[dict]:
+    def _positive_candidates(
+        self, proposals: list[Proposal], scores: np.ndarray
+    ) -> list[dict]:
         candidates = [
-            {"proposal": proposal, "delta": float(delta), "touch_set": proposal.touch_set()}
+            {
+                "proposal": proposal,
+                "delta": float(delta),
+                "touch_set": proposal.touch_set(),
+            }
             for proposal, delta in zip(proposals, scores, strict=True)
             if delta > 0.0 and np.isfinite(delta)
         ]
         return candidates
 
-    def _select_positive_nonconflicting_candidates(self, candidates: list[dict]) -> list[dict]:
+    def _random_walk_candidates(
+        self, proposals: list[Proposal], scores: np.ndarray
+    ) -> list[dict]:
+        if self.random_accept_prob is None or self.random_accept_prob <= 0.0:
+            return []
+        if (
+            self.random_accept_max_fraction is None
+            or self.random_accept_max_fraction <= 0.0
+        ):
+            return []
+        max_candidates = int(
+            np.floor(len(proposals) * float(self.random_accept_max_fraction))
+        )
+        if max_candidates <= 0:
+            return []
+
+        selected: list[dict] = []
+        for proposal, delta in zip(proposals, scores, strict=True):
+            delta = float(delta)
+            if delta > 0.0 or not np.isfinite(delta):
+                continue
+            if isinstance(proposal, MergeProposal):
+                continue
+            if self.rng.random() >= float(self.random_accept_prob):
+                continue
+            selected.append(
+                {
+                    "proposal": proposal,
+                    "delta": delta,
+                    "touch_set": proposal.touch_set(),
+                    "random_walk": True,
+                },
+            )
+
+        if len(selected) <= max_candidates:
+            return selected
+        keep = self.rng.choice(len(selected), size=max_candidates, replace=False)
+        return [selected[int(idx)] for idx in keep.tolist()]
+
+    def _select_positive_nonconflicting_candidates(
+        self, candidates: list[dict]
+    ) -> list[dict]:
         candidates.sort(key=lambda item: item["delta"], reverse=True)
 
         accepted: list[dict] = []
@@ -708,7 +903,13 @@ class Optimizer:
 
     def _full_merge_phase(self, state: PartitionState, backend, *, stage: str) -> dict:
         if not self._should_run_full_merge(state, stage):
-            return {"n_steps": 0, "delta": 0.0, "operations": [], "stage": stage, "n_sweeps": 0}
+            return {
+                "n_steps": 0,
+                "delta": 0.0,
+                "operations": [],
+                "stage": stage,
+                "n_sweeps": 0,
+            }
 
         total_delta = 0.0
         operations: list[dict] = []
@@ -725,7 +926,10 @@ class Optimizer:
             self.sampler.notify_state_changed(state, touched_clusters)
             delta = float(sum(item["delta"] for item in accepted))
             total_delta += delta
-            operations.extend(self._proposal_to_record(item["proposal"], item["delta"]) for item in accepted)
+            operations.extend(
+                self._proposal_to_record(item["proposal"], item["delta"])
+                for item in accepted
+            )
             sweeps_run += 1
         return {
             "n_steps": len(operations),
@@ -747,7 +951,12 @@ class Optimizer:
             cluster_b = int(active[i])
             for j in range(i):
                 cluster_a = int(active[j])
-                chunk.append(MergeProposal(cluster_a=min(cluster_a, cluster_b), cluster_b=max(cluster_a, cluster_b)))
+                chunk.append(
+                    MergeProposal(
+                        cluster_a=min(cluster_a, cluster_b),
+                        cluster_b=max(cluster_a, cluster_b),
+                    )
+                )
                 if len(chunk) >= chunk_size:
                     scores = backend.score_batch(state, chunk)
                     candidates.extend(self._positive_candidates(chunk, scores))
@@ -757,7 +966,9 @@ class Optimizer:
             candidates.extend(self._positive_candidates(chunk, scores))
         return candidates
 
-    def _greedy_merge_sweep(self, state: PartitionState, backend, *, stage: str) -> dict:
+    def _greedy_merge_sweep(
+        self, state: PartitionState, backend, *, stage: str
+    ) -> dict:
         if self._should_run_full_merge(state, stage):
             return {"n_steps": 0, "delta": 0.0, "operations": [], "stage": stage}
         if self.greedy_merge_sweeps <= 0 or self.greedy_merge_candidates <= 0:
@@ -770,7 +981,9 @@ class Optimizer:
         sweeps_run = 0
         for _ in range(self.greedy_merge_sweeps):
             self.sampler.prepare_round(state)
-            proposals = self._build_greedy_merge_candidates(state, self.greedy_merge_candidates)
+            proposals = self._build_greedy_merge_candidates(
+                state, self.greedy_merge_candidates
+            )
             if not proposals:
                 break
             scores = backend.score_batch(state, proposals)
@@ -782,7 +995,10 @@ class Optimizer:
             self.sampler.notify_state_changed(state, touched_clusters)
             delta = float(sum(item["delta"] for item in accepted))
             total_delta += delta
-            operations.extend(self._proposal_to_record(item["proposal"], item["delta"]) for item in accepted)
+            operations.extend(
+                self._proposal_to_record(item["proposal"], item["delta"])
+                for item in accepted
+            )
             sweeps_run += 1
         return {
             "n_steps": len(operations),
@@ -792,11 +1008,18 @@ class Optimizer:
             "stage": stage,
         }
 
-    def _build_greedy_merge_candidates(self, state: PartitionState, limit: int) -> list[Proposal]:
+    def _build_greedy_merge_candidates(
+        self, state: PartitionState, limit: int
+    ) -> list[Proposal]:
         unique: dict[tuple, Proposal] = {}
 
-        for cluster_a, cluster_b in self.sampler._deterministic_merge_pairs[: int(limit)]:
-            if cluster_a not in state.active_cluster_ids or cluster_b not in state.active_cluster_ids:
+        for cluster_a, cluster_b in self.sampler._deterministic_merge_pairs[
+            : int(limit)
+        ]:
+            if (
+                cluster_a not in state.active_cluster_ids
+                or cluster_b not in state.active_cluster_ids
+            ):
                 continue
             proposal = MergeProposal(int(cluster_a), int(cluster_b))
             unique[self._proposal_key(proposal)] = proposal
@@ -805,8 +1028,12 @@ class Optimizer:
 
         active = state.active_cluster_array()
         for cluster_id in active.tolist():
-            for target_cluster in self.sampler.merge_neighbors_for(int(cluster_id), self.sampler.top_merge_neighbors):
-                if int(target_cluster) not in state.active_cluster_ids or int(cluster_id) == int(target_cluster):
+            for target_cluster in self.sampler.merge_neighbors_for(
+                int(cluster_id), self.sampler.top_merge_neighbors
+            ):
+                if int(target_cluster) not in state.active_cluster_ids or int(
+                    cluster_id
+                ) == int(target_cluster):
                     continue
                 cluster_a, cluster_b = sorted((int(cluster_id), int(target_cluster)))
                 proposal = MergeProposal(cluster_a, cluster_b)
@@ -815,7 +1042,9 @@ class Optimizer:
                     return list(unique.values())
 
         attempts = 0
-        while len(unique) < int(limit) and active.size >= 2 and attempts < int(limit) * 4:
+        while (
+            len(unique) < int(limit) and active.size >= 2 and attempts < int(limit) * 4
+        ):
             choice = self.rng.choice(active, size=2, replace=False)
             cluster_a, cluster_b = sorted((int(choice[0]), int(choice[1])))
             proposal = MergeProposal(cluster_a, cluster_b)
@@ -826,10 +1055,14 @@ class Optimizer:
     def _should_run_exact_cell_reassign(self, state: PartitionState) -> bool:
         return (
             self.exact_cell_reassign_passes > 0
-            and 1 < len(state.active_cluster_ids) <= self.exact_cell_reassign_active_limit
+            and 1
+            < len(state.active_cluster_ids)
+            <= self.exact_cell_reassign_active_limit
         )
 
-    def _exact_cell_reassignment_sweep(self, state: PartitionState, backend, *, stage: str) -> dict:
+    def _exact_cell_reassignment_sweep(
+        self, state: PartitionState, backend, *, stage: str
+    ) -> dict:
         del stage
         if not self._should_run_exact_cell_reassign(state):
             return {"n_steps": 0, "delta": 0.0, "operations": [], "n_passes": 0}
@@ -843,7 +1076,9 @@ class Optimizer:
         for _ in range(self.exact_cell_reassign_passes):
             move_count = 0
             for cell in cell_iter:
-                proposal, delta = self._best_cell_reassignment(state, backend, int(cell))
+                proposal, delta = self._best_cell_reassignment(
+                    state, backend, int(cell)
+                )
                 best_delta_per_cell[int(cell)] = max(float(delta), 0.0)
                 if proposal is None or not np.isfinite(delta) or delta <= 0.0:
                     continue
@@ -856,8 +1091,12 @@ class Optimizer:
             passes_run += 1
             if move_count == 0:
                 break
-            focus_count = max(1, int(np.ceil(state.n_cells * self.exact_cell_reassign_top_fraction)))
-            cell_iter = np.argsort(-best_delta_per_cell)[:focus_count].astype(np.int64, copy=False)
+            focus_count = max(
+                1, int(np.ceil(state.n_cells * self.exact_cell_reassign_top_fraction))
+            )
+            cell_iter = np.argsort(-best_delta_per_cell)[:focus_count].astype(
+                np.int64, copy=False
+            )
 
         return {
             "n_steps": len(operations),
@@ -892,7 +1131,11 @@ class Optimizer:
         for start in range(0, targets.size, chunk_size):
             target_chunk = targets[start : start + chunk_size]
             proposals = [
-                MoveProposal(cell=cell, source_cluster=source_cluster, target_cluster=int(target_cluster))
+                MoveProposal(
+                    cell=cell,
+                    source_cluster=source_cluster,
+                    target_cluster=int(target_cluster),
+                )
                 for target_cluster in target_chunk.tolist()
             ]
             if not proposals:
@@ -907,11 +1150,16 @@ class Optimizer:
                 best_proposal = proposals[best_idx]
         return best_proposal, best_delta
 
-    def _cluster_reassignment_sweep(self, state: PartitionState, backend, *, stage: str) -> dict:
+    def _cluster_reassignment_sweep(
+        self, state: PartitionState, backend, *, stage: str
+    ) -> dict:
         if self.cluster_reassign_sweeps <= 0 or len(state.active_cluster_ids) < 2:
             return {"n_steps": 0, "delta": 0.0, "operations": [], "stage": stage}
         if stage == "coarsen":
-            max_sources = min(self.cluster_reassign_max_sources, max(8, self._target_cluster_count(state) // 2))
+            max_sources = min(
+                self.cluster_reassign_max_sources,
+                max(8, self._target_cluster_count(state) // 2),
+            )
         else:
             max_sources = self.cluster_reassign_max_sources
 
@@ -920,7 +1168,9 @@ class Optimizer:
         sweeps_run = 0
         for _ in range(self.cluster_reassign_sweeps):
             self.sampler.prepare_round(state)
-            proposals = self._build_cluster_reassignment_candidates(state, max_sources=max_sources)
+            proposals = self._build_cluster_reassignment_candidates(
+                state, max_sources=max_sources
+            )
             if not proposals:
                 break
             scores = backend.score_batch(state, proposals)
@@ -932,7 +1182,10 @@ class Optimizer:
             self.sampler.notify_state_changed(state, touched_clusters)
             delta = float(sum(item["delta"] for item in accepted))
             total_delta += delta
-            operations.extend(self._proposal_to_record(item["proposal"], item["delta"]) for item in accepted)
+            operations.extend(
+                self._proposal_to_record(item["proposal"], item["delta"])
+                for item in accepted
+            )
             sweeps_run += 1
         return {
             "n_steps": len(operations),
@@ -951,7 +1204,13 @@ class Optimizer:
         active = [int(cluster_id) for cluster_id in state.active_cluster_ids]
         if len(active) < 2:
             return []
-        sources = sorted(active, key=lambda cluster_id: (state.cluster_size(cluster_id), state.cluster_total(cluster_id)))
+        sources = sorted(
+            active,
+            key=lambda cluster_id: (
+                state.cluster_size(cluster_id),
+                state.cluster_total(cluster_id),
+            ),
+        )
         sources = sources[: max(0, int(max_sources))]
         unique: dict[tuple, Proposal] = {}
         for source_cluster in sources:
@@ -970,10 +1229,15 @@ class Optimizer:
             if not targets:
                 targets = [
                     int(cluster_id)
-                    for cluster_id in self.sampler.merge_neighbors_for(source_cluster, self.sampler.top_merge_neighbors)
+                    for cluster_id in self.sampler.merge_neighbors_for(
+                        source_cluster, self.sampler.top_merge_neighbors
+                    )
                 ]
             for target_cluster in targets:
-                if source_cluster == int(target_cluster) or int(target_cluster) not in state.active_cluster_ids:
+                if (
+                    source_cluster == int(target_cluster)
+                    or int(target_cluster) not in state.active_cluster_ids
+                ):
                     continue
                 cluster_a, cluster_b = sorted((source_cluster, int(target_cluster)))
                 proposal = MergeProposal(cluster_a, cluster_b)
@@ -1005,7 +1269,9 @@ class Optimizer:
             delta = float(backend.score_batch(state, [proposal])[0])
             if not np.isfinite(delta):
                 continue
-            accept = delta > 0.0 or self.rng.random() < float(np.exp(min(0.0, delta / temperature)))
+            accept = delta > 0.0 or self.rng.random() < float(
+                np.exp(min(0.0, delta / temperature))
+            )
             if not accept:
                 continue
             touched_clusters = self._commit_proposal(state, proposal)
@@ -1070,7 +1336,9 @@ class Optimizer:
         elif isinstance(proposal, PeelProposal):
             state.peel_cell_to_new_cluster(proposal.cell, proposal.source_cluster)
         elif isinstance(proposal, MoveProposal):
-            state.move_cell(proposal.cell, proposal.source_cluster, proposal.target_cluster)
+            state.move_cell(
+                proposal.cell, proposal.source_cluster, proposal.target_cluster
+            )
         elif isinstance(proposal, BlockPeelProposal):
             state.peel_block_to_new_cluster(
                 proposal.block.cells,
@@ -1103,7 +1371,11 @@ class Optimizer:
             return {"n_steps": 0, "delta": 0.0, "operations": []}
         total_delta = 0.0
         operations: list[dict] = []
-        focus_clusters = [cluster_id for cluster_id in touched_clusters if cluster_id in state.active_cluster_ids]
+        focus_clusters = [
+            cluster_id
+            for cluster_id in touched_clusters
+            if cluster_id in state.active_cluster_ids
+        ]
 
         for _ in range(self.serial_refine_passes):
             self.sampler.prepare_round(state)
@@ -1118,10 +1390,18 @@ class Optimizer:
             proposal = candidates[best_idx]
             touched_clusters = self._commit_proposal(state, proposal)
             self.sampler.notify_state_changed(state, touched_clusters)
-            focus_clusters = [cluster_id for cluster_id in touched_clusters if cluster_id in state.active_cluster_ids]
+            focus_clusters = [
+                cluster_id
+                for cluster_id in touched_clusters
+                if cluster_id in state.active_cluster_ids
+            ]
             total_delta += best_delta
             operations.append(self._proposal_to_record(proposal, best_delta))
-        return {"n_steps": len(operations), "delta": total_delta, "operations": operations}
+        return {
+            "n_steps": len(operations),
+            "delta": total_delta,
+            "operations": operations,
+        }
 
     def _build_refinement_candidates(
         self,
@@ -1129,7 +1409,12 @@ class Optimizer:
         focus_clusters: list[int],
     ) -> list[Proposal]:
         if not focus_clusters:
-            focus_clusters = [int(cluster_id) for cluster_id in self.sampler._active_clusters[: min(12, len(self.sampler._active_clusters))]]
+            focus_clusters = [
+                int(cluster_id)
+                for cluster_id in self.sampler._active_clusters[
+                    : min(12, len(self.sampler._active_clusters))
+                ]
+            ]
         proposals: list[Proposal] = []
 
         for cluster_id in focus_clusters:
@@ -1137,9 +1422,14 @@ class Optimizer:
             if cluster_id not in state.active_cluster_ids:
                 continue
 
-            for target_cluster in self.sampler.merge_neighbors_for(cluster_id, self.serial_refine_merge_candidates):
+            for target_cluster in self.sampler.merge_neighbors_for(
+                cluster_id, self.serial_refine_merge_candidates
+            ):
                 target_cluster = int(target_cluster)
-                if cluster_id == target_cluster or target_cluster not in state.active_cluster_ids:
+                if (
+                    cluster_id == target_cluster
+                    or target_cluster not in state.active_cluster_ids
+                ):
                     continue
                 cluster_a, cluster_b = sorted((cluster_id, target_cluster))
                 proposals.append(MergeProposal(cluster_a, cluster_b))
@@ -1185,11 +1475,21 @@ class Optimizer:
         if isinstance(proposal, PeelProposal):
             return ("peel", proposal.cell, proposal.source_cluster)
         if isinstance(proposal, MoveProposal):
-            return ("move", proposal.cell, proposal.source_cluster, proposal.target_cluster)
+            return (
+                "move",
+                proposal.cell,
+                proposal.source_cluster,
+                proposal.target_cluster,
+            )
         if isinstance(proposal, BlockPeelProposal):
             return ("block_peel", proposal.source_cluster, proposal.block.cells)
         if isinstance(proposal, BlockMoveProposal):
-            return ("block_move", proposal.source_cluster, proposal.target_cluster, proposal.block.cells)
+            return (
+                "block_move",
+                proposal.source_cluster,
+                proposal.target_cluster,
+                proposal.block.cells,
+            )
         raise TypeError(f"unsupported proposal type: {type(proposal)!r}")
 
     def _assert_disjoint_touch_sets(self, accepted: list[dict]) -> None:
@@ -1197,7 +1497,9 @@ class Optimizer:
         for item in accepted:
             touch_set = set(item["touch_set"])
             if not touched.isdisjoint(touch_set):
-                raise AssertionError("accepted operations do not have disjoint touch sets")
+                raise AssertionError(
+                    "accepted operations do not have disjoint touch sets"
+                )
             touched.update(touch_set)
 
     def _relative_improvement_below_threshold(
