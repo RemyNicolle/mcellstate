@@ -97,6 +97,8 @@ class Optimizer:
         max_scored_proposals: int | None = None,
         random_accept_prob: float | None = None,
         random_accept_max_fraction: float | None = None,
+        recompute_ll_each_round: bool | None = None,
+        cuda_empty_cache: bool = False,
     ) -> None:
         optimizer_mode = str(optimizer_mode).lower()
         if optimizer_mode not in self.OPTIMIZER_MODES:
@@ -158,6 +160,10 @@ class Optimizer:
             if random_accept_max_fraction is None
             else max(0.0, float(random_accept_max_fraction))
         )
+        self.recompute_ll_each_round = (
+            None if recompute_ll_each_round is None else bool(recompute_ll_each_round)
+        )
+        self.cuda_empty_cache = bool(cuda_empty_cache)
         self._apply_optimizer_mode_defaults()
         self.rng = np.random.default_rng(seed)
         self.base_family_weights = {
@@ -203,6 +209,8 @@ class Optimizer:
                 self.random_accept_prob = 0.0
             if self.random_accept_max_fraction is None:
                 self.random_accept_max_fraction = 0.0
+            if self.recompute_ll_each_round is None:
+                self.recompute_ll_each_round = True
             return
         if self.optimizer_mode in {self.GPU_HEAVY_MODE, self.GPU_FULL_MODE}:
             self.full_merge_stage = False
@@ -214,6 +222,8 @@ class Optimizer:
             self.serial_refine_passes = 0
             if self.proposal_workers is None:
                 self.proposal_workers = max(2, min(8, os.cpu_count() or 2))
+            if self.backend_threads is None:
+                self.backend_threads = max(2, min(16, os.cpu_count() or 2))
             if self.random_proposals is None:
                 self.random_proposals = True
             if self.max_scored_proposals is None:
@@ -222,6 +232,8 @@ class Optimizer:
                 self.random_accept_prob = 0.002
             if self.random_accept_max_fraction is None:
                 self.random_accept_max_fraction = 0.002
+            if self.recompute_ll_each_round is None:
+                self.recompute_ll_each_round = False
             return
         if self.optimizer_mode == self.CPU_ONLY_MODE:
             if self.proposal_workers is None:
@@ -234,6 +246,8 @@ class Optimizer:
                 self.random_accept_prob = 0.0
             if self.random_accept_max_fraction is None:
                 self.random_accept_max_fraction = 0.0
+            if self.recompute_ll_each_round is None:
+                self.recompute_ll_each_round = True
             return
 
     def fit(
@@ -317,7 +331,12 @@ class Optimizer:
                 full_merge = self._full_merge_phase(state, backend, stage=stage)
                 timing["full_merge_s"] = time.perf_counter() - timer
                 if full_merge["delta"] != 0.0:
-                    current_ll = full_partition_log_likelihood(state, psi)
+                    current_ll = self._advance_log_likelihood(
+                        current_ll,
+                        float(full_merge["delta"]),
+                        state,
+                        psi,
+                    )
 
                 timer = time.perf_counter()
                 if verbose:
@@ -333,7 +352,12 @@ class Optimizer:
                 )
                 timing["exact_cell_reassign_s"] = time.perf_counter() - timer
                 if exact_cell_reassign["delta"] != 0.0:
-                    current_ll = full_partition_log_likelihood(state, psi)
+                    current_ll = self._advance_log_likelihood(
+                        current_ll,
+                        float(exact_cell_reassign["delta"]),
+                        state,
+                        psi,
+                    )
 
                 timer = time.perf_counter()
                 if verbose:
@@ -347,7 +371,12 @@ class Optimizer:
                 greedy_merge = self._greedy_merge_sweep(state, backend, stage=stage)
                 timing["greedy_merge_s"] = time.perf_counter() - timer
                 if greedy_merge["delta"] != 0.0:
-                    current_ll = full_partition_log_likelihood(state, psi)
+                    current_ll = self._advance_log_likelihood(
+                        current_ll,
+                        float(greedy_merge["delta"]),
+                        state,
+                        psi,
+                    )
 
                 timer = time.perf_counter()
                 if verbose:
@@ -370,6 +399,8 @@ class Optimizer:
                         message=f"score {len(proposals)} proposals on {self.backend_name}",
                     )
                 scores = backend.score_batch(state, proposals)
+                if self.cuda_empty_cache:
+                    self._empty_cuda_cache()
                 timing["scoring_s"] = time.perf_counter() - timer
                 timer = time.perf_counter()
                 if verbose:
@@ -430,7 +461,12 @@ class Optimizer:
                         )
                     touched_clusters = self._commit_batch(state, accepted)
                     self.sampler.notify_state_changed(state, touched_clusters)
-                    current_ll = full_partition_log_likelihood(state, psi)
+                    current_ll = self._advance_log_likelihood(
+                        current_ll,
+                        accepted_delta,
+                        state,
+                        psi,
+                    )
                 timing["commit_s"] = time.perf_counter() - timer
 
                 timer = time.perf_counter()
@@ -447,7 +483,12 @@ class Optimizer:
                 )
                 timing["serial_refine_s"] = time.perf_counter() - timer
                 if refinement["delta"] != 0.0:
-                    current_ll = full_partition_log_likelihood(state, psi)
+                    current_ll = self._advance_log_likelihood(
+                        current_ll,
+                        float(refinement["delta"]),
+                        state,
+                        psi,
+                    )
 
                 timer = time.perf_counter()
                 if verbose:
@@ -463,7 +504,12 @@ class Optimizer:
                 )
                 timing["cluster_reassign_s"] = time.perf_counter() - timer
                 if cluster_reassign["delta"] != 0.0:
-                    current_ll = full_partition_log_likelihood(state, psi)
+                    current_ll = self._advance_log_likelihood(
+                        current_ll,
+                        float(cluster_reassign["delta"]),
+                        state,
+                        psi,
+                    )
 
                 timer = time.perf_counter()
                 if verbose:
@@ -479,9 +525,13 @@ class Optimizer:
                 )
                 timing["perturbation_s"] = time.perf_counter() - timer
                 if perturbation["delta"] != 0.0:
-                    current_ll = full_partition_log_likelihood(state, psi)
+                    current_ll = self._advance_log_likelihood(
+                        current_ll,
+                        float(perturbation["delta"]),
+                        state,
+                        psi,
+                    )
 
-                after_partition_ll = full_partition_log_likelihood(state, psi)
                 total_delta = (
                     float(full_merge["delta"])
                     + float(exact_cell_reassign["delta"])
@@ -490,6 +540,12 @@ class Optimizer:
                     + float(refinement["delta"])
                     + float(cluster_reassign["delta"])
                     + float(perturbation["delta"])
+                )
+                after_partition_ll = self._round_log_likelihood_after(
+                    round_before_ll,
+                    total_delta,
+                    state,
+                    psi,
                 )
 
                 round_record["active_clusters"] = len(state.active_cluster_ids)
@@ -570,16 +626,24 @@ class Optimizer:
                     break
                 round_idx += 1
 
+            exact_final_ll = full_partition_log_likelihood(state, psi)
+            if history:
+                history[-1]["log_likelihood_after"] = exact_final_ll
+                history[-1]["partition_log_likelihood_after"] = exact_final_ll
             result = FitResult(
                 state=state,
                 z=state.z.copy(),
-                log_likelihood=current_ll,
+                log_likelihood=exact_final_ll,
                 history=history,
                 psi=psi.copy(),
                 restart_summaries=None,
             )
             histories.append(
-                {"restart": restart, "history": history, "log_likelihood": current_ll}
+                {
+                    "restart": restart,
+                    "history": history,
+                    "log_likelihood": exact_final_ll,
+                }
             )
             if (
                 best_result is None
@@ -689,6 +753,37 @@ class Optimizer:
         except Exception:  # pragma: no cover - defensive
             return None
         return allocated, reserved
+
+    def _empty_cuda_cache(self) -> None:
+        try:
+            from .backends import torch
+        except Exception:  # pragma: no cover - defensive
+            return
+        if torch is None or not torch.cuda.is_available():
+            return
+        torch.cuda.empty_cache()
+
+    def _advance_log_likelihood(
+        self,
+        current_ll: float,
+        delta: float,
+        state: PartitionState,
+        psi: np.ndarray,
+    ) -> float:
+        if self.recompute_ll_each_round or self.validate_batches:
+            return full_partition_log_likelihood(state, psi)
+        return float(current_ll + float(delta))
+
+    def _round_log_likelihood_after(
+        self,
+        round_before_ll: float,
+        total_delta: float,
+        state: PartitionState,
+        psi: np.ndarray,
+    ) -> float:
+        if self.recompute_ll_each_round or self.validate_batches:
+            return full_partition_log_likelihood(state, psi)
+        return float(round_before_ll + float(total_delta))
 
     def _make_restart_state(
         self,

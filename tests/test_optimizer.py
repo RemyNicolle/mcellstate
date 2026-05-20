@@ -200,6 +200,8 @@ def test_gpu_heavy_mode_disables_cpu_heavy_refinement_phases():
     assert optimizer.serial_refine_passes == 0
     assert optimizer.perturb_every == 0
     assert optimizer.perturb_steps == 0
+    assert optimizer.backend_threads >= 2
+    assert optimizer.recompute_ll_each_round is False
     assert optimizer.sampler.random_proposals is True
     assert optimizer.sampler.max_unique_proposals == 200
     optimizer._configure_stage(state, "coarsen")
@@ -323,4 +325,5 @@ def test_cpu_only_mode_enables_parallel_proposal_sampling_defaults():
 
     assert optimizer.proposal_workers >= 2
     assert optimizer.backend_threads >= 2
+    assert optimizer.recompute_ll_each_round is True
     assert weights["move"] > weights["peel"]

@@ -716,8 +716,15 @@ class TorchCudaBackend(TorchDeviceBackend):
         state: PartitionState,
         *,
         chunk_size: int = 8192,
+        num_threads: int | None = None,
     ) -> None:
-        super().__init__(psi, state, device="cuda", chunk_size=chunk_size)
+        super().__init__(
+            psi,
+            state,
+            device="cuda",
+            chunk_size=chunk_size,
+            num_threads=num_threads,
+        )
 
 
 class TorchCPUBackend(TorchDeviceBackend):
@@ -747,10 +754,10 @@ def make_backend(
     if backend in {"torch-cpu", "cpu-torch", "torch"}:
         return TorchCPUBackend(psi, state, num_threads=num_threads)
     if backend == "cuda":
-        return TorchCudaBackend(psi, state)
+        return TorchCudaBackend(psi, state, num_threads=num_threads)
     if backend == "auto":
         if _torch_device_available("cuda") and _torch_device_supports_float64("cuda"):
-            return TorchCudaBackend(psi, state)
+            return TorchCudaBackend(psi, state, num_threads=num_threads)
         if torch is not None:
             return TorchCPUBackend(psi, state, num_threads=num_threads)
         return CPUBackend(psi, state)

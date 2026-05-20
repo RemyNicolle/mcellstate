@@ -76,6 +76,8 @@ def run_fit(
     random_proposals: bool | None,
     random_accept_prob: float | None,
     random_accept_max_fraction: float | None,
+    recompute_ll_each_round: bool | None,
+    cuda_empty_cache: bool,
     max_rounds: int,
     stall_rounds: int,
     improvement_window: int,
@@ -138,6 +140,16 @@ def run_fit(
             if random_accept_max_fraction is None
             else ["--random-accept-max-fraction", str(random_accept_max_fraction)]
         ),
+        *(
+            []
+            if recompute_ll_each_round is None
+            else (
+                ["--recompute-ll-each-round"]
+                if recompute_ll_each_round
+                else ["--fast-ll-tracking"]
+            )
+        ),
+        *(["--cuda-empty-cache"] if cuda_empty_cache else []),
         "--max-rounds",
         str(max_rounds),
         "--stall-rounds",
@@ -205,6 +217,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(random_proposals=None)
     parser.add_argument("--random-accept-prob", type=float, default=None)
     parser.add_argument("--random-accept-max-fraction", type=float, default=None)
+    parser.add_argument(
+        "--recompute-ll-each-round",
+        dest="recompute_ll_each_round",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--fast-ll-tracking",
+        dest="recompute_ll_each_round",
+        action="store_false",
+    )
+    parser.set_defaults(recompute_ll_each_round=None)
+    parser.add_argument("--cuda-empty-cache", action="store_true")
     parser.add_argument("--max-rounds", type=int, default=0)
     parser.add_argument("--stall-rounds", type=int, default=1)
     parser.add_argument("--improvement-window", type=int, default=5)
@@ -279,6 +303,8 @@ def main(argv: list[str] | None = None) -> int:
                 if args.random_accept_max_fraction is None
                 else float(args.random_accept_max_fraction)
             ),
+            recompute_ll_each_round=args.recompute_ll_each_round,
+            cuda_empty_cache=bool(args.cuda_empty_cache),
             max_rounds=int(args.max_rounds),
             stall_rounds=int(args.stall_rounds),
             improvement_window=int(args.improvement_window),

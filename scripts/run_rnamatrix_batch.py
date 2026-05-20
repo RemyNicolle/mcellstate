@@ -72,6 +72,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(random_proposals=None)
     parser.add_argument("--random-accept-prob", type=float, default=None)
     parser.add_argument("--random-accept-max-fraction", type=float, default=None)
+    parser.add_argument(
+        "--recompute-ll-each-round",
+        dest="recompute_ll_each_round",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--fast-ll-tracking",
+        dest="recompute_ll_each_round",
+        action="store_false",
+    )
+    parser.set_defaults(recompute_ll_each_round=None)
+    parser.add_argument("--cuda-empty-cache", action="store_true")
     parser.add_argument("--max-rounds", type=int, default=0)
     parser.add_argument("--stall-rounds", type=int, default=1)
     parser.add_argument("--improvement-window", type=int, default=5)
@@ -208,6 +220,16 @@ def main(argv: list[str] | None = None) -> int:
                             str(args.random_accept_max_fraction),
                         ]
                     ),
+                    *(
+                        []
+                        if args.recompute_ll_each_round is None
+                        else (
+                            ["--recompute-ll-each-round"]
+                            if args.recompute_ll_each_round
+                            else ["--fast-ll-tracking"]
+                        )
+                    ),
+                    *(["--cuda-empty-cache"] if args.cuda_empty_cache else []),
                     "--max-rounds",
                     str(args.max_rounds),
                     "--stall-rounds",

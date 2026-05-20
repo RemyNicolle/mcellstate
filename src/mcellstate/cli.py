@@ -167,6 +167,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Round cap for random-walk bad moves as a fraction of scored proposals.",
     )
     fit.add_argument(
+        "--recompute-ll-each-round",
+        dest="recompute_ll_each_round",
+        action="store_true",
+        help="Recompute exact full log-likelihood every round instead of fast delta tracking.",
+    )
+    fit.add_argument(
+        "--fast-ll-tracking",
+        dest="recompute_ll_each_round",
+        action="store_false",
+        help="Track round log-likelihood by accepted deltas and recompute exactly at the end.",
+    )
+    fit.set_defaults(recompute_ll_each_round=None)
+    fit.add_argument(
+        "--cuda-empty-cache",
+        action="store_true",
+        help="Release PyTorch's CUDA caching allocator after each scoring batch.",
+    )
+    fit.add_argument(
         "--max-rounds",
         type=int,
         default=0,
@@ -316,6 +334,8 @@ def run_fit(args: argparse.Namespace) -> dict:
             "random_proposals": args.random_proposals,
             "random_accept_prob": args.random_accept_prob,
             "random_accept_max_fraction": args.random_accept_max_fraction,
+            "recompute_ll_each_round": args.recompute_ll_each_round,
+            "cuda_empty_cache": bool(args.cuda_empty_cache),
             "seed": args.seed,
             "validate_batches": bool(args.validate_batches)
             or bool(optimizer_kwargs.get("validate_batches", False)),
@@ -380,6 +400,8 @@ def run_fit(args: argparse.Namespace) -> dict:
         "random_accept_max_fraction": float(
             optimizer.random_accept_max_fraction or 0.0
         ),
+        "recompute_ll_each_round": bool(optimizer.recompute_ll_each_round),
+        "cuda_empty_cache": bool(optimizer.cuda_empty_cache),
         "target_clusters": int(target_clusters),
         "validate_batches": bool(args.validate_batches),
         "update_psi": bool(args.update_psi),
