@@ -4,6 +4,7 @@ import csv
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from scipy import sparse
 from scipy.io import mmread
 
@@ -54,31 +55,29 @@ def load_count_matrix(path: Path) -> sparse.csr_matrix:
 
 
 def tsv_to_csr(path: Path) -> sparse.csr_matrix:
-    rows: list[int] = []
-    cols: list[int] = []
-    vals: list[int] = []
+    # 1. Read header to find cell names and n_cells
+    with path.open("r") as f:
+        header = f.readline().strip().split("\t")
+    if len(header) < 2:
+        raise ValueError(f"{path} has no cell columns")
+    n_cells = len(header) - 1
 
-    with path.open("r", newline="") as handle:
-        reader = csv.reader(handle, delimiter="\t")
-        header = next(reader)
-        if len(header) < 2:
-            raise ValueError(f"{path} has no cell columns")
-        n_cells = len(header) - 1
-        n_genes = 0
-        for record in reader:
-            if not record:
-                continue
-            if len(record) != n_cells + 1:
-                raise ValueError(f"{path} line {n_genes + 2} has {len(record)} columns, expected {n_cells + 1}")
-            for cell_idx, value in enumerate(record[1:]):
-                umi = int(float(value))
-                if umi:
-                    rows.append(cell_idx)
-                    cols.append(n_genes)
-                    vals.append(umi)
-            n_genes += 1
+    # 2. Read in chunks of genes to keep memory low
+    chunk_list = []
+    # Using chunksize=5000 is memory efficient and extremely fast.
+    # index_col=0 treats the first column (gene names) as row index.
+    for chunk in pd.read_csv(path, sep="\t", index_col=0, chunksize=5000):
+        # chunk is shape (chunk_genes, n_cells)
+        # Handle NaN values by filling with 0, cast to int64, transpose to (n_cells, chunk_genes)
+        dense_chunk = chunk.fillna(0.0).values.T.astype(np.int64)
+        sparse_chunk = sparse.csr_matrix(dense_chunk)
+        chunk_list.append(sparse_chunk)
 
-    matrix = sparse.csr_matrix((vals, (rows, cols)), shape=(n_cells, n_genes), dtype=np.int64)
+    if not chunk_list:
+        return sparse.csr_matrix((n_cells, 0), dtype=np.int64)
+
+    # Combine all chunks column-wise (since each chunk is a subset of genes)
+    matrix = sparse.hstack(chunk_list, format="csr", dtype=np.int64)
     matrix.sum_duplicates()
     matrix.sort_indices()
     gene_mask = np.asarray(matrix.sum(axis=0)).ravel() > 0

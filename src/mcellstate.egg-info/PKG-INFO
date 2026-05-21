@@ -1,0 +1,104 @@
+Metadata-Version: 2.4
+Name: mcellstate
+Version: 0.1.1
+Summary: Collapsed Dirichlet-multinomial partitioning and doublet auditing for sparse scRNA-seq UMI counts
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: networkx
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: scipy
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+
+# mcellstate
+
+`mcellstate` is a clean replacement-oriented workspace for hard partitioning of scRNA-seq UMI count matrices, with a separate post-partition doublet audit tool and a clearly isolated upstream `cellstates` reference copy.
+
+## Repo layout
+
+- `src/mcellstate/`: maintained product code for conversion and fitting
+- `src/mcellstate_doublet/`: maintained post-partition doublet audit code
+- `scripts/`: thin user-facing wrappers
+- `benchmarks/`: comparison scripts, benchmark data, benchmark outputs, benchmark reports
+- `reference/cellstates/`: read-only upstream reference code
+
+## Install
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install -U setuptools wheel
+pip install --no-build-isolation -e .
+```
+
+For CUDA:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+```
+
+`mcellstate` requires Python 3.11 or newer.
+
+## Quick start
+
+Convert an RNAmatrix TSV file:
+
+```bash
+mcellstate convert --input RNAmatrix_sample.tsv --output sample.npz
+```
+
+Fit a partition:
+
+```bash
+mcellstate fit --input sample.npz --output labels.npy --preset gpu --backend cuda --progress
+```
+
+Force a CPU-only run with parallel proposal sampling:
+
+```bash
+mcellstate fit --input sample.npz --output labels.npy --preset cpu --proposal-workers 4 --progress
+```
+
+Use the more aggressive GPU-focused mode:
+
+```bash
+mcellstate fit --input sample.npz --output labels.npy --preset gpu-full --backend cuda --proposal-workers 4 --progress
+```
+
+GPU presets use cheap random proposals by default, skip guided proposal precomputation, disable block proposals, and cap scored proposals at 25,000 per round. Override with `--max-scored-proposals`, or use `--guided-proposals` to restore the guided sampler.
+
+Audit the fitted labels for likely doublets:
+
+```bash
+mcellstate audit-doublets --input sample.npz --labels labels.npy --output doublets.tsv
+```
+
+Batch-run a directory of `RNAmatrix*.tsv` files:
+
+```bash
+python scripts/run_rnamatrix_batch.py \
+  --input-root /path/to/Cellstates \
+  --output-root /path/to/results \
+  --cache-root /path/to/cache \
+  --preset gpu-full \
+  --backend cuda
+```
+
+## Presets
+
+- `balanced`: default mixed search strategy
+- `cpu`: CPU-only search with parallel proposal-family sampling
+- `gpu`: minimizes CPU-heavy refinement and favors CUDA scoring
+- `gpu-full`: pushes further toward GPU-scoreable proposal mixes
+- `quality`: more exhaustive refinement
+- `benchmark`: stable settings for comparison runs
+
+## Docs
+
+- [Getting started](docs/getting-started.md)
+- [CLI](docs/cli.md)
+- [Input formats](docs/input-formats.md)
+- [GPU notes](docs/gpu.md)
+- [Benchmarking](docs/benchmarking.md)

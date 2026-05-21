@@ -267,12 +267,58 @@ class TorchDeviceBackend(CPUBackend):
         self.psi0_tensor = torch.tensor(
             self.psi0, dtype=torch.float64, device=self.device
         )
+        
+        # Initialize GPU-resident state variables
+        self.state_version = state.version
+        self.psi_tensor = torch.tensor(self.psi, dtype=torch.float64, device=self.device)
+        self.cell_totals_tensor = torch.tensor(state.cell_totals, dtype=torch.float64, device=self.device)
+        self.X_indptr_tensor = torch.tensor(state.X.indptr, dtype=torch.int64, device=self.device)
+        self.X_indices_tensor = torch.tensor(state.X.indices, dtype=torch.int64, device=self.device)
+        self.X_data_tensor = torch.tensor(state.X.data, dtype=torch.float64, device=self.device)
+        self.cell_ll_tensor = torch.tensor(self.cell_ll, dtype=torch.float64, device=self.device)
+        
+        capacity = max(1000, state.next_cluster_id + 2000)
+        self.cluster_capacity = capacity
+        self.cluster_matrix = torch.zeros((capacity, state.n_genes), dtype=torch.float64, device=self.device)
+        self.cluster_totals = torch.zeros(capacity, dtype=torch.float64, device=self.device)
+        for cid, vector in state.clusters.items():
+            genes, counts = vector.sorted_items()
+            if len(genes):
+                self.cluster_matrix[cid, torch.tensor(genes, dtype=torch.int64, device=self.device)] = torch.tensor(counts, dtype=torch.float64, device=self.device)
+            self.cluster_totals[cid] = float(vector.total)
+
+    def _ensure_cluster_capacity(self, next_id: int) -> None:
+        if next_id >= self.cluster_capacity:
+            new_capacity = next_id + 2000
+            new_matrix = torch.zeros((new_capacity, self.cluster_matrix.shape[1]), dtype=torch.float64, device=self.device)
+            new_totals = torch.zeros(new_capacity, dtype=torch.float64, device=self.device)
+            new_matrix[:self.cluster_capacity] = self.cluster_matrix
+            new_totals[:self.cluster_capacity] = self.cluster_totals
+            self.cluster_matrix = new_matrix
+            self.cluster_totals = new_totals
+            self.cluster_capacity = new_capacity
 
     def score_batch(
         self, state: PartitionState, proposals: list[Proposal]
     ) -> np.ndarray:
         if not proposals:
             return np.empty(0, dtype=np.float64)
+
+        # Automated state synchronization check
+        if self.state_version != state.version:
+            self._ensure_cluster_capacity(state.next_cluster_id)
+            for cid in state.last_touched_clusters:
+                if cid in state.active_cluster_ids:
+                    vector = state.clusters[cid]
+                    genes, counts = vector.sorted_items()
+                    self.cluster_matrix[cid].zero_()
+                    if len(genes):
+                        self.cluster_matrix[cid, torch.tensor(genes, dtype=torch.int64, device=self.device)] = torch.tensor(counts, dtype=torch.float64, device=self.device)
+                    self.cluster_totals[cid] = float(vector.total)
+                else:
+                    self.cluster_matrix[cid].zero_()
+                    self.cluster_totals[cid] = 0.0
+            self.state_version = state.version
 
         scores = np.full(len(proposals), -np.inf, dtype=np.float64)
         by_type: dict[str, list[tuple[int, Proposal]]] = defaultdict(list)
@@ -293,14 +339,6 @@ class TorchDeviceBackend(CPUBackend):
             self._score_merges(state, chunk, scores)
         return scores
 
-    def _fill_rows_parallel(
-        self,
-        n_rows: int,
-        worker,
-    ) -> None:
-        ranges = self._parallel_ranges(n_rows, min_items_per_worker=32)
-        self._run_parallel_ranges(ranges, worker)
-
     def _chunked(
         self, indexed: list[tuple[int, Proposal]]
     ) -> list[list[tuple[int, Proposal]]]:
@@ -318,57 +356,53 @@ class TorchDeviceBackend(CPUBackend):
         scores: np.ndarray,
     ) -> None:
         batch = [proposal for _, proposal in indexed]
-        lengths = np.asarray(
-            [state.cell_nnz[proposal.cell] for proposal in batch], dtype=np.int64
-        )
-        max_len = int(lengths.max(initial=0))
+        cell_ids = torch.tensor([proposal.cell for proposal in batch], dtype=torch.int64, device=self.device)
+        source_cids = torch.tensor([proposal.source_cluster for proposal in batch], dtype=torch.int64, device=self.device)
+        
+        starts = self.X_indptr_tensor[cell_ids]
+        ends = self.X_indptr_tensor[cell_ids + 1]
+        lengths = ends - starts
+        max_len = int(lengths.max(initial=0).item())
+        
         if max_len == 0:
-            deltas = self._remove_totals_only(
-                np.asarray(
-                    [
-                        state.cluster_total(proposal.source_cluster)
-                        for proposal in batch
-                    ],
-                    dtype=np.float64,
-                ),
-                np.asarray(
-                    [state.cell_totals[proposal.cell] for proposal in batch],
-                    dtype=np.float64,
-                ),
-            )
-            deltas += self.cell_ll[[proposal.cell for proposal in batch]]
-            for (idx, _), delta in zip(indexed, deltas, strict=True):
-                scores[idx] = delta
+            source_totals = self.cluster_totals[source_cids]
+            cell_totals = self.cell_totals_tensor[cell_ids]
+            deltas = torch.lgamma(source_totals + self.psi0_tensor) - torch.lgamma(source_totals - cell_totals + self.psi0_tensor)
+            deltas += self.cell_ll_tensor[cell_ids]
+            scores[[idx for idx, _ in indexed]] = deltas.cpu().numpy()
             return
-
-        psi_pad = np.ones((len(batch), max_len), dtype=np.float64)
-        source_pad = np.zeros((len(batch), max_len), dtype=np.float64)
-        cell_pad = np.zeros((len(batch), max_len), dtype=np.float64)
-        source_totals = np.empty(len(batch), dtype=np.float64)
-        cell_totals = np.empty(len(batch), dtype=np.float64)
-
-        def fill_rows(start: int, end: int) -> None:
-            for row in range(start, end):
-                proposal = batch[row]
-                genes, counts = state.cell_counts(proposal.cell)
-                length = len(genes)
-                if length:
-                    psi_pad[row, :length] = self.psi[genes]
-                    cell_pad[row, :length] = counts
-                    source_pad[row, :length] = state.clusters[
-                        proposal.source_cluster
-                    ].get_many(genes)
-                source_totals[row] = state.cluster_total(proposal.source_cluster)
-                cell_totals[row] = state.cell_totals[proposal.cell]
-
-        self._fill_rows_parallel(len(batch), fill_rows)
-
-        deltas = self._remove_delta_tensor(
-            source_pad, cell_pad, psi_pad, source_totals, cell_totals
+            
+        grid = torch.arange(max_len, device=self.device).expand(len(batch), max_len)
+        mask = grid < lengths.unsqueeze(1)
+        
+        index_tensor = starts.unsqueeze(1) + torch.arange(max_len, device=self.device)
+        clamped_indices = torch.where(mask, index_tensor, torch.zeros_like(index_tensor))
+        
+        genes_2d = torch.gather(self.X_indices_tensor, 0, clamped_indices.view(-1)).view(len(batch), max_len)
+        counts_2d = torch.gather(self.X_data_tensor, 0, clamped_indices.view(-1)).view(len(batch), max_len)
+        
+        genes_2d = torch.where(mask, genes_2d, torch.zeros_like(genes_2d))
+        counts_2d = torch.where(mask, counts_2d, torch.zeros_like(counts_2d))
+        
+        psi_pad = torch.gather(self.psi_tensor, 0, genes_2d.view(-1)).view(len(batch), max_len)
+        psi_pad = torch.where(mask, psi_pad, torch.ones_like(psi_pad))
+        
+        rows = source_cids.unsqueeze(1).expand(len(batch), max_len)
+        source_pad = self.cluster_matrix[rows, genes_2d]
+        source_pad = torch.where(mask, source_pad, torch.zeros_like(source_pad))
+        
+        source_totals = self.cluster_totals[source_cids]
+        cell_totals = self.cell_totals_tensor[cell_ids]
+        
+        delta = torch.lgamma(source_totals + self.psi0_tensor)
+        delta -= torch.lgamma(source_totals - cell_totals + self.psi0_tensor)
+        delta += torch.sum(
+            torch.lgamma(source_pad - counts_2d + psi_pad) - torch.lgamma(source_pad + psi_pad),
+            dim=1
         )
-        deltas += self.cell_ll[[proposal.cell for proposal in batch]]
-        for (idx, _), delta in zip(indexed, deltas, strict=True):
-            scores[idx] = delta
+        
+        delta += self.cell_ll_tensor[cell_ids]
+        scores[[idx for idx, _ in indexed]] = delta.cpu().numpy()
 
     def _score_moves(
         self,
@@ -377,78 +411,69 @@ class TorchDeviceBackend(CPUBackend):
         scores: np.ndarray,
     ) -> None:
         batch = [proposal for _, proposal in indexed]
-        lengths = np.asarray(
-            [state.cell_nnz[proposal.cell] for proposal in batch], dtype=np.int64
-        )
-        max_len = int(lengths.max(initial=0))
+        cell_ids = torch.tensor([proposal.cell for proposal in batch], dtype=torch.int64, device=self.device)
+        source_cids = torch.tensor([proposal.source_cluster for proposal in batch], dtype=torch.int64, device=self.device)
+        target_cids = torch.tensor([proposal.target_cluster for proposal in batch], dtype=torch.int64, device=self.device)
+        
+        starts = self.X_indptr_tensor[cell_ids]
+        ends = self.X_indptr_tensor[cell_ids + 1]
+        lengths = ends - starts
+        max_len = int(lengths.max(initial=0).item())
+        
         if max_len == 0:
-            source_delta = self._remove_totals_only(
-                np.asarray(
-                    [
-                        state.cluster_total(proposal.source_cluster)
-                        for proposal in batch
-                    ],
-                    dtype=np.float64,
-                ),
-                np.asarray(
-                    [state.cell_totals[proposal.cell] for proposal in batch],
-                    dtype=np.float64,
-                ),
-            )
-            target_delta = self._add_totals_only(
-                np.asarray(
-                    [
-                        state.cluster_total(proposal.target_cluster)
-                        for proposal in batch
-                    ],
-                    dtype=np.float64,
-                ),
-                np.asarray(
-                    [state.cell_totals[proposal.cell] for proposal in batch],
-                    dtype=np.float64,
-                ),
-            )
+            source_totals = self.cluster_totals[source_cids]
+            target_totals = self.cluster_totals[target_cids]
+            cell_totals = self.cell_totals_tensor[cell_ids]
+            
+            source_delta = torch.lgamma(source_totals + self.psi0_tensor) - torch.lgamma(source_totals - cell_totals + self.psi0_tensor)
+            target_delta = torch.lgamma(target_totals + self.psi0_tensor) - torch.lgamma(target_totals + cell_totals + self.psi0_tensor)
             deltas = source_delta + target_delta
-            for (idx, _), delta in zip(indexed, deltas, strict=True):
-                scores[idx] = delta
+            scores[[idx for idx, _ in indexed]] = deltas.cpu().numpy()
             return
-
-        psi_pad = np.ones((len(batch), max_len), dtype=np.float64)
-        source_pad = np.zeros((len(batch), max_len), dtype=np.float64)
-        target_pad = np.zeros((len(batch), max_len), dtype=np.float64)
-        cell_pad = np.zeros((len(batch), max_len), dtype=np.float64)
-        source_totals = np.empty(len(batch), dtype=np.float64)
-        target_totals = np.empty(len(batch), dtype=np.float64)
-        cell_totals = np.empty(len(batch), dtype=np.float64)
-
-        def fill_rows(start: int, end: int) -> None:
-            for row in range(start, end):
-                proposal = batch[row]
-                genes, counts = state.cell_counts(proposal.cell)
-                length = len(genes)
-                if length:
-                    psi_pad[row, :length] = self.psi[genes]
-                    cell_pad[row, :length] = counts
-                    source_pad[row, :length] = state.clusters[
-                        proposal.source_cluster
-                    ].get_many(genes)
-                    target_pad[row, :length] = state.clusters[
-                        proposal.target_cluster
-                    ].get_many(genes)
-                source_totals[row] = state.cluster_total(proposal.source_cluster)
-                target_totals[row] = state.cluster_total(proposal.target_cluster)
-                cell_totals[row] = state.cell_totals[proposal.cell]
-
-        self._fill_rows_parallel(len(batch), fill_rows)
-
-        deltas = self._remove_delta_tensor(
-            source_pad, cell_pad, psi_pad, source_totals, cell_totals
+            
+        grid = torch.arange(max_len, device=self.device).expand(len(batch), max_len)
+        mask = grid < lengths.unsqueeze(1)
+        
+        index_tensor = starts.unsqueeze(1) + torch.arange(max_len, device=self.device)
+        clamped_indices = torch.where(mask, index_tensor, torch.zeros_like(index_tensor))
+        
+        genes_2d = torch.gather(self.X_indices_tensor, 0, clamped_indices.view(-1)).view(len(batch), max_len)
+        counts_2d = torch.gather(self.X_data_tensor, 0, clamped_indices.view(-1)).view(len(batch), max_len)
+        
+        genes_2d = torch.where(mask, genes_2d, torch.zeros_like(genes_2d))
+        counts_2d = torch.where(mask, counts_2d, torch.zeros_like(counts_2d))
+        
+        psi_pad = torch.gather(self.psi_tensor, 0, genes_2d.view(-1)).view(len(batch), max_len)
+        psi_pad = torch.where(mask, psi_pad, torch.ones_like(psi_pad))
+        
+        rows_source = source_cids.unsqueeze(1).expand(len(batch), max_len)
+        source_pad = self.cluster_matrix[rows_source, genes_2d]
+        source_pad = torch.where(mask, source_pad, torch.zeros_like(source_pad))
+        
+        rows_target = target_cids.unsqueeze(1).expand(len(batch), max_len)
+        target_pad = self.cluster_matrix[rows_target, genes_2d]
+        target_pad = torch.where(mask, target_pad, torch.zeros_like(target_pad))
+        
+        source_totals = self.cluster_totals[source_cids]
+        target_totals = self.cluster_totals[target_cids]
+        cell_totals = self.cell_totals_tensor[cell_ids]
+        
+        source_delta = torch.lgamma(source_totals + self.psi0_tensor)
+        source_delta -= torch.lgamma(source_totals - cell_totals + self.psi0_tensor)
+        source_delta += torch.sum(
+            torch.lgamma(source_pad - counts_2d + psi_pad) - torch.lgamma(source_pad + psi_pad),
+            dim=1
         )
-        deltas += self._add_delta_tensor(
-            target_pad, cell_pad, psi_pad, target_totals, cell_totals
+        
+        target_delta = torch.lgamma(target_totals + self.psi0_tensor)
+        target_delta -= torch.lgamma(target_totals + cell_totals + self.psi0_tensor)
+        target_delta += torch.sum(
+            torch.lgamma(target_pad + counts_2d + psi_pad) - torch.lgamma(target_pad + psi_pad),
+            dim=1
         )
-        for (idx, _), delta in zip(indexed, deltas, strict=True):
-            scores[idx] = delta
+        
+        deltas = source_delta + target_delta
+        scores[[idx for idx, _ in indexed]] = deltas.cpu().numpy()
 
     def _score_merges(
         self,
@@ -457,62 +482,80 @@ class TorchDeviceBackend(CPUBackend):
         scores: np.ndarray,
     ) -> None:
         batch = [proposal for _, proposal in indexed]
-        small_vectors = []
-        large_vectors = []
-        small_ll = np.empty(len(batch), dtype=np.float64)
-        small_totals = np.empty(len(batch), dtype=np.float64)
-        large_totals = np.empty(len(batch), dtype=np.float64)
+        small_cids = []
+        large_cids = []
+        small_ll_arr = np.empty(len(batch), dtype=np.float64)
+        small_totals_arr = np.empty(len(batch), dtype=np.float64)
+        large_totals_arr = np.empty(len(batch), dtype=np.float64)
         lengths = np.empty(len(batch), dtype=np.int64)
-
+        
+        small_vectors = []
+        
         for row, proposal in enumerate(batch):
             vector_a = state.clusters[proposal.cluster_a]
             vector_b = state.clusters[proposal.cluster_b]
             if vector_a.nnz <= vector_b.nnz:
+                small_cid, large_cid = proposal.cluster_a, proposal.cluster_b
                 small, large = vector_a, vector_b
             else:
+                small_cid, large_cid = proposal.cluster_b, proposal.cluster_a
                 small, large = vector_b, vector_a
+            
+            small_cids.append(small_cid)
+            large_cids.append(large_cid)
             small_vectors.append(small)
-            large_vectors.append(large)
-            small_ll[row] = state.cluster_log_likelihood_cached(
-                proposal.cluster_a if small is vector_a else proposal.cluster_b,
-                self.psi,
-            )
-            small_totals[row] = small.total
-            large_totals[row] = large.total
+            
+            small_ll_arr[row] = state.cluster_log_likelihood_cached(small_cid, self.psi)
+            small_totals_arr[row] = small.total
+            large_totals_arr[row] = large.total
             lengths[row] = small.nnz
-
+            
         max_len = int(lengths.max(initial=0))
         if max_len == 0:
-            deltas = self._add_totals_only(large_totals, small_totals) - small_ll
-            for (idx, _), delta in zip(indexed, deltas, strict=True):
-                scores[idx] = delta
+            large_totals = torch.tensor(large_totals_arr, dtype=torch.float64, device=self.device)
+            small_totals = torch.tensor(small_totals_arr, dtype=torch.float64, device=self.device)
+            small_ll = torch.tensor(small_ll_arr, dtype=torch.float64, device=self.device)
+            
+            deltas = torch.lgamma(large_totals + self.psi0_tensor) - torch.lgamma(large_totals + small_totals + self.psi0_tensor) - small_ll
+            scores[[idx for idx, _ in indexed]] = deltas.cpu().numpy()
             return
-
-        psi_pad = np.ones((len(batch), max_len), dtype=np.float64)
-        large_pad = np.zeros((len(batch), max_len), dtype=np.float64)
-        small_pad = np.zeros((len(batch), max_len), dtype=np.float64)
-
-        def fill_rows(start: int, end: int) -> None:
-            for row in range(start, end):
-                small = small_vectors[row]
-                large = large_vectors[row]
-                genes, counts = small.sorted_items()
-                length = len(genes)
-                if length:
-                    psi_pad[row, :length] = self.psi[genes]
-                    small_pad[row, :length] = counts
-                    large_pad[row, :length] = large.get_many(genes)
-
-        self._fill_rows_parallel(len(batch), fill_rows)
-
-        deltas = (
-            self._add_delta_tensor(
-                large_pad, small_pad, psi_pad, large_totals, small_totals
-            )
-            - small_ll
+            
+        genes_np = np.zeros((len(batch), max_len), dtype=np.int64)
+        small_counts_np = np.zeros((len(batch), max_len), dtype=np.float64)
+        mask_np = np.zeros((len(batch), max_len), dtype=bool)
+        
+        for row, small in enumerate(small_vectors):
+            genes, counts = small.sorted_items()
+            length = len(genes)
+            if length:
+                genes_np[row, :length] = genes
+                small_counts_np[row, :length] = counts
+                mask_np[row, :length] = True
+                
+        genes_2d = torch.tensor(genes_np, dtype=torch.int64, device=self.device)
+        small_pad = torch.tensor(small_counts_np, dtype=torch.float64, device=self.device)
+        mask = torch.tensor(mask_np, dtype=torch.bool, device=self.device)
+        
+        psi_pad = torch.gather(self.psi_tensor, 0, genes_2d.view(-1)).view(len(batch), max_len)
+        psi_pad = torch.where(mask, psi_pad, torch.ones_like(psi_pad))
+        
+        large_cids_tensor = torch.tensor(large_cids, dtype=torch.int64, device=self.device)
+        rows = large_cids_tensor.unsqueeze(1).expand(len(batch), max_len)
+        large_pad = self.cluster_matrix[rows, genes_2d]
+        large_pad = torch.where(mask, large_pad, torch.zeros_like(large_pad))
+        
+        large_totals = torch.tensor(large_totals_arr, dtype=torch.float64, device=self.device)
+        small_totals = torch.tensor(small_totals_arr, dtype=torch.float64, device=self.device)
+        small_ll = torch.tensor(small_ll_arr, dtype=torch.float64, device=self.device)
+        
+        delta = torch.lgamma(large_totals + self.psi0_tensor)
+        delta -= torch.lgamma(large_totals + small_totals + self.psi0_tensor)
+        delta += torch.sum(
+            torch.lgamma(large_pad + small_pad + psi_pad) - torch.lgamma(large_pad + psi_pad),
+            dim=1
         )
-        for (idx, _), delta in zip(indexed, deltas, strict=True):
-            scores[idx] = delta
+        delta -= small_ll
+        scores[[idx for idx, _ in indexed]] = delta.cpu().numpy()
 
     def _score_block_peels(
         self,
@@ -521,57 +564,68 @@ class TorchDeviceBackend(CPUBackend):
         scores: np.ndarray,
     ) -> None:
         batch = [proposal for _, proposal in indexed]
-        block_ll = np.empty(len(batch), dtype=np.float64)
-        source_totals = np.empty(len(batch), dtype=np.float64)
-        block_totals = np.empty(len(batch), dtype=np.float64)
-        lengths = np.asarray(
-            [proposal.block.indices.size for proposal in batch], dtype=np.int64
-        )
-
+        block_ll_arr = np.empty(len(batch), dtype=np.float64)
+        source_totals_arr = np.empty(len(batch), dtype=np.float64)
+        block_totals_arr = np.empty(len(batch), dtype=np.float64)
+        lengths = np.asarray([proposal.block.indices.size for proposal in batch], dtype=np.int64)
+        
         for row, proposal in enumerate(batch):
-            block_ll[row] = cluster_log_likelihood_from_sparse(
+            block_ll_arr[row] = cluster_log_likelihood_from_sparse(
                 proposal.block.indices,
                 proposal.block.values,
                 self.psi,
                 psi0=self.psi0,
             )
-            source_totals[row] = state.cluster_total(proposal.source_cluster)
-            block_totals[row] = proposal.block.total
-
+            source_totals_arr[row] = state.cluster_total(proposal.source_cluster)
+            block_totals_arr[row] = proposal.block.total
+            
         max_len = int(lengths.max(initial=0))
         if max_len == 0:
-            deltas = self._remove_totals_only(source_totals, block_totals) + block_ll
-            for (idx, _), delta in zip(indexed, deltas, strict=True):
-                scores[idx] = delta
+            source_totals = torch.tensor(source_totals_arr, dtype=torch.float64, device=self.device)
+            block_totals = torch.tensor(block_totals_arr, dtype=torch.float64, device=self.device)
+            block_ll = torch.tensor(block_ll_arr, dtype=torch.float64, device=self.device)
+            
+            deltas = torch.lgamma(source_totals + self.psi0_tensor) - torch.lgamma(source_totals - block_totals + self.psi0_tensor) + block_ll
+            scores[[idx for idx, _ in indexed]] = deltas.cpu().numpy()
             return
-
-        psi_pad = np.ones((len(batch), max_len), dtype=np.float64)
-        source_pad = np.zeros((len(batch), max_len), dtype=np.float64)
-        block_pad = np.zeros((len(batch), max_len), dtype=np.float64)
-
-        def fill_rows(start: int, end: int) -> None:
-            for row in range(start, end):
-                proposal = batch[row]
-                genes = proposal.block.indices
-                counts = proposal.block.values
-                length = len(genes)
-                if length:
-                    psi_pad[row, :length] = self.psi[genes]
-                    block_pad[row, :length] = counts
-                    source_pad[row, :length] = state.clusters[
-                        proposal.source_cluster
-                    ].get_many(genes)
-
-        self._fill_rows_parallel(len(batch), fill_rows)
-
-        deltas = (
-            self._remove_delta_tensor(
-                source_pad, block_pad, psi_pad, source_totals, block_totals
-            )
-            + block_ll
+            
+        genes_np = np.zeros((len(batch), max_len), dtype=np.int64)
+        block_counts_np = np.zeros((len(batch), max_len), dtype=np.float64)
+        mask_np = np.zeros((len(batch), max_len), dtype=bool)
+        
+        for row, proposal in enumerate(batch):
+            genes = proposal.block.indices
+            counts = proposal.block.values
+            length = len(genes)
+            if length:
+                genes_np[row, :length] = genes
+                block_counts_np[row, :length] = counts
+                mask_np[row, :length] = True
+                
+        genes_2d = torch.tensor(genes_np, dtype=torch.int64, device=self.device)
+        block_pad = torch.tensor(block_counts_np, dtype=torch.float64, device=self.device)
+        mask = torch.tensor(mask_np, dtype=torch.bool, device=self.device)
+        
+        psi_pad = torch.gather(self.psi_tensor, 0, genes_2d.view(-1)).view(len(batch), max_len)
+        psi_pad = torch.where(mask, psi_pad, torch.ones_like(psi_pad))
+        
+        source_cids = torch.tensor([proposal.source_cluster for proposal in batch], dtype=torch.int64, device=self.device)
+        rows = source_cids.unsqueeze(1).expand(len(batch), max_len)
+        source_pad = self.cluster_matrix[rows, genes_2d]
+        source_pad = torch.where(mask, source_pad, torch.zeros_like(source_pad))
+        
+        source_totals = torch.tensor(source_totals_arr, dtype=torch.float64, device=self.device)
+        block_totals = torch.tensor(block_totals_arr, dtype=torch.float64, device=self.device)
+        block_ll = torch.tensor(block_ll_arr, dtype=torch.float64, device=self.device)
+        
+        delta = torch.lgamma(source_totals + self.psi0_tensor)
+        delta -= torch.lgamma(source_totals - block_totals + self.psi0_tensor)
+        delta += torch.sum(
+            torch.lgamma(source_pad - block_pad + psi_pad) - torch.lgamma(source_pad + psi_pad),
+            dim=1
         )
-        for (idx, _), delta in zip(indexed, deltas, strict=True):
-            scores[idx] = delta
+        delta += block_ll
+        scores[[idx for idx, _ in indexed]] = delta.cpu().numpy()
 
     def _score_block_moves(
         self,
@@ -580,133 +634,77 @@ class TorchDeviceBackend(CPUBackend):
         scores: np.ndarray,
     ) -> None:
         batch = [proposal for _, proposal in indexed]
-        source_totals = np.empty(len(batch), dtype=np.float64)
-        target_totals = np.empty(len(batch), dtype=np.float64)
-        block_totals = np.empty(len(batch), dtype=np.float64)
-        lengths = np.asarray(
-            [proposal.block.indices.size for proposal in batch], dtype=np.int64
-        )
-
+        source_totals_arr = np.empty(len(batch), dtype=np.float64)
+        target_totals_arr = np.empty(len(batch), dtype=np.float64)
+        block_totals_arr = np.empty(len(batch), dtype=np.float64)
+        lengths = np.asarray([proposal.block.indices.size for proposal in batch], dtype=np.int64)
+        
         for row, proposal in enumerate(batch):
-            source_totals[row] = state.cluster_total(proposal.source_cluster)
-            target_totals[row] = state.cluster_total(proposal.target_cluster)
-            block_totals[row] = proposal.block.total
-
+            source_totals_arr[row] = state.cluster_total(proposal.source_cluster)
+            target_totals_arr[row] = state.cluster_total(proposal.target_cluster)
+            block_totals_arr[row] = proposal.block.total
+            
         max_len = int(lengths.max(initial=0))
         if max_len == 0:
-            deltas = self._remove_totals_only(source_totals, block_totals)
-            deltas += self._add_totals_only(target_totals, block_totals)
-            for (idx, _), delta in zip(indexed, deltas, strict=True):
-                scores[idx] = delta
+            source_totals = torch.tensor(source_totals_arr, dtype=torch.float64, device=self.device)
+            target_totals = torch.tensor(target_totals_arr, dtype=torch.float64, device=self.device)
+            block_totals = torch.tensor(block_totals_arr, dtype=torch.float64, device=self.device)
+            
+            deltas = torch.lgamma(source_totals + self.psi0_tensor) - torch.lgamma(source_totals - block_totals + self.psi0_tensor)
+            deltas += torch.lgamma(target_totals + self.psi0_tensor) - torch.lgamma(target_totals + block_totals + self.psi0_tensor)
+            scores[[idx for idx, _ in indexed]] = deltas.cpu().numpy()
             return
-
-        psi_pad = np.ones((len(batch), max_len), dtype=np.float64)
-        source_pad = np.zeros((len(batch), max_len), dtype=np.float64)
-        target_pad = np.zeros((len(batch), max_len), dtype=np.float64)
-        block_pad = np.zeros((len(batch), max_len), dtype=np.float64)
-
-        def fill_rows(start: int, end: int) -> None:
-            for row in range(start, end):
-                proposal = batch[row]
-                genes = proposal.block.indices
-                counts = proposal.block.values
-                length = len(genes)
-                if length:
-                    psi_pad[row, :length] = self.psi[genes]
-                    block_pad[row, :length] = counts
-                    source_pad[row, :length] = state.clusters[
-                        proposal.source_cluster
-                    ].get_many(genes)
-                    target_pad[row, :length] = state.clusters[
-                        proposal.target_cluster
-                    ].get_many(genes)
-
-        self._fill_rows_parallel(len(batch), fill_rows)
-
-        deltas = self._remove_delta_tensor(
-            source_pad, block_pad, psi_pad, source_totals, block_totals
+            
+        genes_np = np.zeros((len(batch), max_len), dtype=np.int64)
+        block_counts_np = np.zeros((len(batch), max_len), dtype=np.float64)
+        mask_np = np.zeros((len(batch), max_len), dtype=bool)
+        
+        for row, proposal in enumerate(batch):
+            genes = proposal.block.indices
+            counts = proposal.block.values
+            length = len(genes)
+            if length:
+                genes_np[row, :length] = genes
+                block_counts_np[row, :length] = counts
+                mask_np[row, :length] = True
+                
+        genes_2d = torch.tensor(genes_np, dtype=torch.int64, device=self.device)
+        block_pad = torch.tensor(block_counts_np, dtype=torch.float64, device=self.device)
+        mask = torch.tensor(mask_np, dtype=torch.bool, device=self.device)
+        
+        psi_pad = torch.gather(self.psi_tensor, 0, genes_2d.view(-1)).view(len(batch), max_len)
+        psi_pad = torch.where(mask, psi_pad, torch.ones_like(psi_pad))
+        
+        source_cids = torch.tensor([proposal.source_cluster for proposal in batch], dtype=torch.int64, device=self.device)
+        rows_source = source_cids.unsqueeze(1).expand(len(batch), max_len)
+        source_pad = self.cluster_matrix[rows_source, genes_2d]
+        source_pad = torch.where(mask, source_pad, torch.zeros_like(source_pad))
+        
+        target_cids = torch.tensor([proposal.target_cluster for proposal in batch], dtype=torch.int64, device=self.device)
+        rows_target = target_cids.unsqueeze(1).expand(len(batch), max_len)
+        target_pad = self.cluster_matrix[rows_target, genes_2d]
+        target_pad = torch.where(mask, target_pad, torch.zeros_like(target_pad))
+        
+        source_totals = torch.tensor(source_totals_arr, dtype=torch.float64, device=self.device)
+        target_totals = torch.tensor(target_totals_arr, dtype=torch.float64, device=self.device)
+        block_totals = torch.tensor(block_totals_arr, dtype=torch.float64, device=self.device)
+        
+        source_delta = torch.lgamma(source_totals + self.psi0_tensor)
+        source_delta -= torch.lgamma(source_totals - block_totals + self.psi0_tensor)
+        source_delta += torch.sum(
+            torch.lgamma(source_pad - block_pad + psi_pad) - torch.lgamma(source_pad + psi_pad),
+            dim=1
         )
-        deltas += self._add_delta_tensor(
-            target_pad, block_pad, psi_pad, target_totals, block_totals
+        
+        target_delta = torch.lgamma(target_totals + self.psi0_tensor)
+        target_delta -= torch.lgamma(target_totals + block_totals + self.psi0_tensor)
+        target_delta += torch.sum(
+            torch.lgamma(target_pad + block_pad + psi_pad) - torch.lgamma(target_pad + psi_pad),
+            dim=1
         )
-        for (idx, _), delta in zip(indexed, deltas, strict=True):
-            scores[idx] = delta
-
-    def _remove_totals_only(
-        self, cluster_totals: np.ndarray, remove_totals: np.ndarray
-    ) -> np.ndarray:
-        return gammaln_array(cluster_totals + self.psi0) - gammaln_array(
-            cluster_totals - remove_totals + self.psi0
-        )
-
-    def _add_totals_only(
-        self, cluster_totals: np.ndarray, add_totals: np.ndarray
-    ) -> np.ndarray:
-        return gammaln_array(cluster_totals + self.psi0) - gammaln_array(
-            cluster_totals + add_totals + self.psi0
-        )
-
-    def _remove_delta_tensor(
-        self,
-        cluster_pad: np.ndarray,
-        remove_pad: np.ndarray,
-        psi_pad: np.ndarray,
-        cluster_totals: np.ndarray,
-        remove_totals: np.ndarray,
-    ) -> np.ndarray:
-        cluster_tensor = torch.as_tensor(
-            cluster_pad, dtype=torch.float64, device=self.device
-        )
-        remove_tensor = torch.as_tensor(
-            remove_pad, dtype=torch.float64, device=self.device
-        )
-        psi_tensor = torch.as_tensor(psi_pad, dtype=torch.float64, device=self.device)
-        cluster_totals_tensor = torch.as_tensor(
-            cluster_totals, dtype=torch.float64, device=self.device
-        )
-        remove_totals_tensor = torch.as_tensor(
-            remove_totals, dtype=torch.float64, device=self.device
-        )
-        delta = torch.lgamma(cluster_totals_tensor + self.psi0_tensor)
-        delta -= torch.lgamma(
-            cluster_totals_tensor - remove_totals_tensor + self.psi0_tensor
-        )
-        delta += torch.sum(
-            torch.lgamma(cluster_tensor - remove_tensor + psi_tensor)
-            - torch.lgamma(cluster_tensor + psi_tensor),
-            dim=1,
-        )
-        return delta.cpu().numpy()
-
-    def _add_delta_tensor(
-        self,
-        cluster_pad: np.ndarray,
-        add_pad: np.ndarray,
-        psi_pad: np.ndarray,
-        cluster_totals: np.ndarray,
-        add_totals: np.ndarray,
-    ) -> np.ndarray:
-        cluster_tensor = torch.as_tensor(
-            cluster_pad, dtype=torch.float64, device=self.device
-        )
-        add_tensor = torch.as_tensor(add_pad, dtype=torch.float64, device=self.device)
-        psi_tensor = torch.as_tensor(psi_pad, dtype=torch.float64, device=self.device)
-        cluster_totals_tensor = torch.as_tensor(
-            cluster_totals, dtype=torch.float64, device=self.device
-        )
-        add_totals_tensor = torch.as_tensor(
-            add_totals, dtype=torch.float64, device=self.device
-        )
-        delta = torch.lgamma(cluster_totals_tensor + self.psi0_tensor)
-        delta -= torch.lgamma(
-            cluster_totals_tensor + add_totals_tensor + self.psi0_tensor
-        )
-        delta += torch.sum(
-            torch.lgamma(cluster_tensor + add_tensor + psi_tensor)
-            - torch.lgamma(cluster_tensor + psi_tensor),
-            dim=1,
-        )
-        return delta.cpu().numpy()
+        
+        deltas = source_delta + target_delta
+        scores[[idx for idx, _ in indexed]] = deltas.cpu().numpy()
 
 
 class TorchCudaBackend(TorchDeviceBackend):

@@ -20,15 +20,19 @@ def resolve_fit_preset(name: str) -> dict[str, Any]:
             "optimizer_mode": Optimizer.CPU_ONLY_MODE,
             "optimizer_kwargs": {},
         }
-    if preset == "gpu":
+    if preset in {"gpu", "gpu-full"}:
+        import os
+        cpu_count = os.cpu_count() or 4
+        default_workers = max(1, cpu_count // 2)
         return {
-            "optimizer_mode": Optimizer.GPU_HEAVY_MODE,
-            "optimizer_kwargs": {},
-        }
-    if preset == "gpu-full":
-        return {
-            "optimizer_mode": Optimizer.GPU_FULL_MODE,
-            "optimizer_kwargs": {},
+            "optimizer_mode": (
+                Optimizer.GPU_HEAVY_MODE if preset == "gpu" else Optimizer.GPU_FULL_MODE
+            ),
+            "optimizer_kwargs": {
+                "recompute_ll_each_round": False,
+                "max_scored_proposals": 25000,
+                "proposal_workers": default_workers,
+            },
         }
     if preset == "quality":
         return {

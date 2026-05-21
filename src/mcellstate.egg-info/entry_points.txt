@@ -1,0 +1,2 @@
+[console_scripts]
+mcellstate = mcellstate.cli:main

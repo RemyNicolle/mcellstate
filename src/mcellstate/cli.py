@@ -282,6 +282,11 @@ def run_fit(args: argparse.Namespace) -> dict:
     preset = resolve_fit_preset(args.preset)
     optimizer_mode = str(args.optimizer_mode or preset["optimizer_mode"])
     effective_backend = str(args.backend)
+    if effective_backend == "auto":
+        if args.preset in {"gpu", "gpu-full"}:
+            effective_backend = "cuda"
+        else:
+            effective_backend = "cpu"
     if optimizer_mode == Optimizer.CPU_ONLY_MODE and effective_backend not in {
         "cpu",
         "numpy",
@@ -321,33 +326,37 @@ def run_fit(args: argparse.Namespace) -> dict:
             flush=True,
         )
     optimizer_kwargs = dict(preset["optimizer_kwargs"])
-    optimizer_kwargs.update(
-        {
-            "state": state,
-            "psi": psi,
-            "optimizer_mode": optimizer_mode,
-            "backend": effective_backend,
-            "backend_threads": args.threads,
-            "proposal_workers": args.proposal_workers,
-            "n_proposals": args.n_proposals,
-            "max_scored_proposals": args.max_scored_proposals,
-            "random_proposals": args.random_proposals,
-            "random_accept_prob": args.random_accept_prob,
-            "random_accept_max_fraction": args.random_accept_max_fraction,
-            "recompute_ll_each_round": args.recompute_ll_each_round,
-            "cuda_empty_cache": bool(args.cuda_empty_cache),
-            "seed": args.seed,
-            "validate_batches": bool(args.validate_batches)
-            or bool(optimizer_kwargs.get("validate_batches", False)),
-            "staged_search": True,
-            "target_clusters": target_clusters,
-            "leiden_restart_targets": (
-                leiden_target,
-                min(n_cells, leiden_target * 2),
-                max(16, leiden_target // 2),
-            ),
-        }
-    )
+    base_kwargs = {
+        "state": state,
+        "psi": psi,
+        "optimizer_mode": optimizer_mode,
+        "backend": effective_backend,
+        "backend_threads": args.threads,
+        "n_proposals": args.n_proposals,
+        "cuda_empty_cache": bool(args.cuda_empty_cache),
+        "seed": args.seed,
+        "validate_batches": bool(args.validate_batches)
+        or bool(optimizer_kwargs.get("validate_batches", False)),
+        "staged_search": True,
+        "target_clusters": target_clusters,
+        "leiden_restart_targets": (
+            leiden_target,
+            min(n_cells, leiden_target * 2),
+            max(16, leiden_target // 2),
+        ),
+    }
+    for key in [
+        "proposal_workers",
+        "max_scored_proposals",
+        "random_proposals",
+        "random_accept_prob",
+        "random_accept_max_fraction",
+        "recompute_ll_each_round",
+    ]:
+        val = getattr(args, key)
+        if val is not None:
+            base_kwargs[key] = val
+    optimizer_kwargs.update(base_kwargs)
     optimizer = Optimizer(**optimizer_kwargs)
 
     fit_max_rounds = None if int(args.max_rounds) <= 0 else int(args.max_rounds)
