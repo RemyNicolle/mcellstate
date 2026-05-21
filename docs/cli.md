@@ -20,6 +20,8 @@ Useful options:
 
 - `--preset balanced|gpu|quality|benchmark`
 - `--backend auto|cpu|torch-cpu|cuda`
+- `--proposal-batch-size`
+- `--cuda-chunk-size`
 - `--restarts`
 - `--n-proposals`
 

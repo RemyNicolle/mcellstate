@@ -51,10 +51,12 @@ mcellstate fit --input sample.npz --output labels.npy --preset cpu --proposal-wo
 Use the more aggressive GPU-focused mode:
 
 ```bash
-mcellstate fit --input sample.npz --output labels.npy --preset gpu-full --backend cuda --proposal-workers 4 --progress
+mcellstate fit --input sample.npz --output labels.npy --preset gpu --backend cuda --proposal-workers 4 --progress
 ```
 
-GPU presets use cheap random proposals by default, skip guided proposal precomputation, disable block proposals, and cap scored proposals at 25,000 per round. Override with `--max-scored-proposals`, or use `--guided-proposals` to restore the guided sampler.
+GPU mode uses cheap random proposals by default, skips guided proposal precomputation, disables block proposals, and generates the random merge/peel/move proposals directly through the GPU backend. Proposal batches are auto-sized from the first rounds, and CUDA chunking is auto-tuned from the first rounds and current free memory; override with `--proposal-batch-size` or `--cuda-chunk-size` if you want to pin either stage. Use `--guided-proposals` to restore the guided sampler.
+
+If the GPU still looks bursty, try a fixed `--cuda-chunk-size` on your card. Avoid `--cuda-empty-cache` unless you need to force allocator release between batches; it reduces memory reservation at the cost of more churn.
 
 Audit the fitted labels for likely doublets:
 
@@ -69,7 +71,7 @@ python scripts/run_rnamatrix_batch.py \
   --input-root /path/to/Cellstates \
   --output-root /path/to/results \
   --cache-root /path/to/cache \
-  --preset gpu-full \
+  --preset gpu \
   --backend cuda
 ```
 
@@ -77,8 +79,7 @@ python scripts/run_rnamatrix_batch.py \
 
 - `balanced`: default mixed search strategy
 - `cpu`: CPU-only search with parallel proposal-family sampling
-- `gpu`: minimizes CPU-heavy refinement and favors CUDA scoring
-- `gpu-full`: pushes further toward GPU-scoreable proposal mixes
+- `gpu`: GPU-oriented search with auto-tuned CUDA chunking
 - `quality`: more exhaustive refinement
 - `benchmark`: stable settings for comparison runs
 

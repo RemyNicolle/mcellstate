@@ -171,7 +171,7 @@ def test_optimizer_can_run_until_no_improvement():
     )
 
 
-def test_gpu_heavy_mode_disables_cpu_heavy_refinement_phases():
+def test_gpu_mode_disables_cpu_heavy_refinement_phases():
     synthetic = generate_synthetic_dataset(
         n_clusters=3,
         cells_per_cluster=6,
@@ -187,7 +187,7 @@ def test_gpu_heavy_mode_disables_cpu_heavy_refinement_phases():
     optimizer = Optimizer(
         state=state,
         psi=psi,
-        optimizer_mode="gpu-heavy",
+        optimizer_mode="gpu",
         backend="cpu",
         n_proposals=200,
         seed=43,
@@ -202,6 +202,7 @@ def test_gpu_heavy_mode_disables_cpu_heavy_refinement_phases():
     assert optimizer.perturb_steps == 0
     assert optimizer.backend_threads >= 2
     assert optimizer.recompute_ll_each_round is False
+    assert optimizer.cuda_chunk_size is None
     assert optimizer.sampler.random_proposals is True
     assert optimizer.sampler.max_unique_proposals == 200
     optimizer._configure_stage(state, "coarsen")
@@ -214,44 +215,6 @@ def test_gpu_heavy_mode_disables_cpu_heavy_refinement_phases():
     )
     assert weights["block_peel"] == 0.0
     assert weights["block_move"] == 0.0
-
-
-def test_gpu_full_mode_shifts_sampling_toward_merge_like_proposals():
-    synthetic = generate_synthetic_dataset(
-        n_clusters=3,
-        cells_per_cluster=6,
-        n_genes=20,
-        marker_strength=28.0,
-        seed=44,
-    )
-    state = PartitionState.from_csr(
-        synthetic.X, init="leiden_overclustered", seed=44, n_clusters=10
-    )
-    psi = make_prior(synthetic.X, tau=1.0)
-
-    optimizer = Optimizer(
-        state=state,
-        psi=psi,
-        optimizer_mode="gpu-full",
-        backend="cpu",
-        n_proposals=200,
-        seed=44,
-    )
-    optimizer._configure_stage(state, "coarsen")
-    weights = dict(
-        zip(
-            optimizer.sampler.family_names,
-            optimizer.sampler.family_weights.tolist(),
-            strict=True,
-        )
-    )
-
-    assert weights["merge"] > 0.7
-    assert weights["move"] < 0.1
-    assert weights["block_peel"] == 0.0
-    assert weights["block_move"] == 0.0
-    assert optimizer.proposal_workers >= 2
-    assert optimizer.sampler.random_proposals is True
 
 
 def test_random_walk_accepts_finite_bad_non_merge_moves():
@@ -291,6 +254,117 @@ def test_random_walk_accepts_finite_bad_non_merge_moves():
     assert accepted
     assert all(item.get("random_walk", False) for item in accepted)
     assert all(not isinstance(item["proposal"], MergeProposal) for item in accepted)
+
+
+def test_optimizer_uses_backend_selection_hook_when_available():
+    synthetic = generate_synthetic_dataset(
+        n_clusters=3,
+        cells_per_cluster=2,
+        n_genes=12,
+        marker_strength=25.0,
+        seed=47,
+    )
+    state = PartitionState.from_csr(
+        synthetic.X, init=np.asarray([0, 0, 1, 1, 2, 2], dtype=np.int64)
+    )
+    psi = make_prior(synthetic.X, tau=1.0)
+
+    optimizer = Optimizer(
+        state=state,
+        psi=psi,
+        backend="cpu",
+        n_proposals=16,
+        seed=47,
+        cluster_reassign_sweeps=0,
+        perturb_every=0,
+        serial_refine_passes=0,
+        random_accept_prob=0.0,
+    )
+
+    candidates = [
+        {
+            "proposal": MergeProposal(0, 1),
+            "delta": 4.0,
+            "touch_set": frozenset((0, 1)),
+            "touch_ids": (0, 1),
+        },
+        {
+            "proposal": PeelProposal(cell=4, source_cluster=2),
+            "delta": 3.0,
+            "touch_set": frozenset((2,)),
+            "touch_ids": (2,),
+        },
+    ]
+
+    calls: list[int] = []
+
+    class DummyBackend:
+        def select_nonconflicting_candidates(self, items):
+            calls.append(len(items))
+            return [items[1]]
+
+    accepted = optimizer._select_positive_nonconflicting_candidates(
+        candidates, backend=DummyBackend()
+    )
+
+    assert calls == [2]
+    assert accepted == [candidates[1]]
+
+
+def test_optimizer_samples_proposals_in_chunks():
+    synthetic = generate_synthetic_dataset(
+        n_clusters=3,
+        cells_per_cluster=2,
+        n_genes=12,
+        marker_strength=25.0,
+        seed=48,
+    )
+    state = PartitionState.from_csr(
+        synthetic.X, init=np.asarray([0, 0, 1, 1, 2, 2], dtype=np.int64)
+    )
+    psi = make_prior(synthetic.X, tau=1.0)
+
+    optimizer = Optimizer(
+        state=state,
+        psi=psi,
+        backend="cpu",
+        n_proposals=5,
+        seed=48,
+        proposal_batch_size=2,
+        cluster_reassign_sweeps=0,
+        perturb_every=0,
+        serial_refine_passes=0,
+        random_accept_prob=0.0,
+    )
+
+    calls: list[int] = []
+
+    def fake_sample_chunk(state_arg, backend_arg, count, seed):  # noqa: ARG001
+        calls.append(int(count))
+        return [MergeProposal(0, 1)] * int(count)
+
+    class DummyBackend:
+        def score_batch(self, state_arg, proposals):  # noqa: ARG002
+            return np.ones(len(proposals), dtype=np.float64)
+
+    optimizer._sample_proposal_chunk = fake_sample_chunk  # type: ignore[method-assign]
+    (
+        proposals,
+        scores,
+        proposal_s,
+        scoring_s,
+        chunk_count,
+    ) = optimizer._sample_and_score_proposals(  # noqa: E501
+        state,
+        DummyBackend(),
+    )
+
+    assert calls == [2, 2, 1]
+    assert chunk_count == 3
+    assert len(proposals) == 5
+    assert scores.shape == (5,)
+    assert proposal_s >= 0.0
+    assert scoring_s >= 0.0
 
 
 def test_cpu_only_mode_enables_parallel_proposal_sampling_defaults():

@@ -70,6 +70,8 @@ def run_fit(
     random_proposals: bool | None,
     random_accept_prob: float | None,
     random_accept_max_fraction: float | None,
+    proposal_batch_size: int | None,
+    cuda_chunk_size: int | None,
     recompute_ll_each_round: bool | None,
     cuda_empty_cache: bool,
     max_rounds: int,
@@ -136,6 +138,16 @@ def run_fit(
         ),
         *(
             []
+            if proposal_batch_size is None
+            else ["--proposal-batch-size", str(proposal_batch_size)]
+        ),
+        *(
+            []
+            if cuda_chunk_size is None
+            else ["--cuda-chunk-size", str(cuda_chunk_size)]
+        ),
+        *(
+            []
             if recompute_ll_each_round is None
             else (
                 ["--recompute-ll-each-round"]
@@ -185,21 +197,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--optimizer-mode",
-        default="gpu-heavy",
-        choices=("effective", "gpu-heavy", "gpu-full", "cpu-only"),
-        help="effective keeps the current mixed search; gpu-heavy reduces CPU-heavy refinement phases; gpu-full shifts further toward GPU-scoreable proposals; cpu-only keeps execution on CPU backends.",
+        default="gpu",
+        choices=("effective", "gpu", "cpu-only"),
+        help="effective keeps the current mixed search; gpu uses the GPU-oriented path; cpu-only keeps execution on CPU backends.",
     )
     parser.add_argument(
         "--backend", default="cuda", help="mcellstate backend. Use cuda for GPU."
     )
-    import os
-    cpu_count = os.cpu_count() or 4
-    default_workers = max(1, cpu_count // 2)
     parser.add_argument(
         "--proposal-workers",
         type=int,
-        default=default_workers,
-        help=f"Parallel proposal-family worker count (defaults to half of CPU cores: {default_workers}).",
+        default=None,
+        help="Parallel proposal-family worker count. Defaults to the optimizer preset when omitted.",
     )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--restarts", type=int, default=1)
@@ -214,6 +223,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(random_proposals=None)
     parser.add_argument("--random-accept-prob", type=float, default=None)
     parser.add_argument("--random-accept-max-fraction", type=float, default=None)
+    parser.add_argument("--proposal-batch-size", type=int, default=None)
+    parser.add_argument("--cuda-chunk-size", type=int, default=None)
     parser.add_argument(
         "--recompute-ll-each-round",
         dest="recompute_ll_each_round",
@@ -300,6 +311,14 @@ def main(argv: list[str] | None = None) -> int:
                 if args.random_accept_max_fraction is None
                 else float(args.random_accept_max_fraction)
             ),
+            proposal_batch_size=(
+                None
+                if args.proposal_batch_size is None
+                else int(args.proposal_batch_size)
+            ),
+            cuda_chunk_size=None
+            if args.cuda_chunk_size is None
+            else int(args.cuda_chunk_size),
             recompute_ll_each_round=args.recompute_ll_each_round,
             cuda_empty_cache=bool(args.cuda_empty_cache),
             max_rounds=int(args.max_rounds),

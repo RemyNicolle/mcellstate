@@ -5,7 +5,7 @@ from typing import Any
 from .optimizer import Optimizer
 
 
-FIT_PRESETS = ("balanced", "cpu", "gpu", "gpu-full", "quality", "benchmark")
+FIT_PRESETS = ("balanced", "cpu", "gpu", "quality", "benchmark")
 
 
 def resolve_fit_preset(name: str) -> dict[str, Any]:
@@ -20,17 +20,15 @@ def resolve_fit_preset(name: str) -> dict[str, Any]:
             "optimizer_mode": Optimizer.CPU_ONLY_MODE,
             "optimizer_kwargs": {},
         }
-    if preset in {"gpu", "gpu-full"}:
+    if preset == "gpu":
         import os
+
         cpu_count = os.cpu_count() or 4
-        default_workers = max(1, cpu_count // 2)
+        default_workers = max(2, min(32, cpu_count))
         return {
-            "optimizer_mode": (
-                Optimizer.GPU_HEAVY_MODE if preset == "gpu" else Optimizer.GPU_FULL_MODE
-            ),
+            "optimizer_mode": Optimizer.GPU_MODE,
             "optimizer_kwargs": {
                 "recompute_ll_each_round": False,
-                "max_scored_proposals": 25000,
                 "proposal_workers": default_workers,
             },
         }

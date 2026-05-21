@@ -50,7 +50,7 @@ def test_cuda_backend_matches_cpu_scores():
     ]
 
     cpu = CPUBackend(psi, state)
-    gpu = TorchCudaBackend(psi, state)
+    gpu = TorchCudaBackend(psi, state, chunk_size=None)
 
     cpu_scores = cpu.score_batch(state, proposals)
     gpu_scores = gpu.score_batch(state, proposals)
@@ -160,6 +160,114 @@ def test_backends_mark_stale_proposals_as_negative_infinity():
 
     assert np.all(np.isneginf(cpu.score_batch(state, stale)))
     assert np.all(np.isneginf(torch_cpu.score_batch(state, stale)))
+
+
+def test_torch_backend_can_generate_random_proposals():
+    synthetic = generate_synthetic_dataset(
+        n_clusters=3,
+        cells_per_cluster=4,
+        n_genes=12,
+        marker_strength=25.0,
+        seed=24,
+    )
+    state = PartitionState.from_csr(
+        synthetic.X,
+        init=np.asarray([0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5]),
+    )
+    psi = np.full(state.n_genes, 0.5, dtype=np.float64)
+    backend = TorchCPUBackend(psi, state, num_threads=2)
+
+    proposals = backend.sample_random_proposals(
+        state,
+        64,
+        family_weights=np.asarray([0.8, 0.1, 0.1, 0.0, 0.0], dtype=np.float64),
+        max_unique_proposals=32,
+        seed=24,
+    )
+
+    assert proposals
+    assert len(proposals) <= 32
+    assert all(
+        isinstance(proposal, (MergeProposal, PeelProposal, MoveProposal))
+        for proposal in proposals
+    )
+
+
+def test_torch_backend_selects_nonconflicting_candidates_on_tensor_path():
+    synthetic = generate_synthetic_dataset(
+        n_clusters=3,
+        cells_per_cluster=2,
+        n_genes=12,
+        marker_strength=25.0,
+        seed=25,
+    )
+    state = PartitionState.from_csr(
+        synthetic.X,
+        init=np.asarray([0, 0, 1, 1, 2, 2]),
+    )
+    psi = np.full(state.n_genes, 0.5, dtype=np.float64)
+    backend = TorchCPUBackend(psi, state, num_threads=2)
+
+    candidates = [
+        {
+            "proposal": MergeProposal(0, 1),
+            "delta": 10.0,
+            "touch_set": frozenset((0, 1)),
+            "touch_ids": (0, 1),
+        },
+        {
+            "proposal": PeelProposal(cell=4, source_cluster=2),
+            "delta": 9.0,
+            "touch_set": frozenset((2,)),
+            "touch_ids": (2,),
+        },
+        {
+            "proposal": MoveProposal(cell=5, source_cluster=2, target_cluster=0),
+            "delta": 8.0,
+            "touch_set": frozenset((0, 2)),
+            "touch_ids": (0, 2),
+        },
+        {
+            "proposal": MoveProposal(cell=2, source_cluster=1, target_cluster=0),
+            "delta": 7.0,
+            "touch_set": frozenset((0, 1)),
+            "touch_ids": (1, 0),
+        },
+    ]
+
+    accepted = backend.select_nonconflicting_candidates(candidates)
+
+    assert [item["proposal"] for item in accepted] == [
+        candidates[0]["proposal"],
+        candidates[1]["proposal"],
+    ]
+
+
+def test_torch_backend_state_cache_syncs_incrementally():
+    synthetic = generate_synthetic_dataset(
+        n_clusters=3,
+        cells_per_cluster=2,
+        n_genes=10,
+        marker_strength=25.0,
+        seed=26,
+    )
+    state = PartitionState.from_csr(
+        synthetic.X,
+        init=np.asarray([0, 0, 1, 1, 2, 2]),
+    )
+    psi = np.full(state.n_genes, 0.5, dtype=np.float64)
+    backend = TorchCPUBackend(psi, state, num_threads=2)
+
+    state.merge_clusters(0, 1)
+    backend.score_batch(state, [MergeProposal(0, 1)])
+
+    assert np.array_equal(backend.z_tensor.cpu().numpy(), state.z)
+    assert int(backend.cluster_totals[1].item()) == 0
+    assert int(backend.cluster_sizes_tensor[0].item()) == state.cluster_size(0)
+    active_ids = backend.active_cluster_ids_tensor[
+        : backend._state_cache.active_cluster_count
+    ].cpu()
+    assert set(active_ids.tolist()) == set(state.active_cluster_ids)
 
 
 def test_mps_backend_is_not_supported():

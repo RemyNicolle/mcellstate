@@ -43,6 +43,9 @@ class MergeProposal:
     def touch_set(self) -> frozenset[int]:
         return frozenset((int(self.cluster_a), int(self.cluster_b)))
 
+    def touch_ids(self) -> tuple[int, int]:
+        return (int(self.cluster_a), int(self.cluster_b))
+
 
 @dataclass(frozen=True)
 class PeelProposal:
@@ -52,6 +55,9 @@ class PeelProposal:
 
     def touch_set(self) -> frozenset[int]:
         return frozenset((int(self.source_cluster),))
+
+    def touch_ids(self) -> tuple[int]:
+        return (int(self.source_cluster),)
 
 
 @dataclass(frozen=True)
@@ -64,6 +70,9 @@ class MoveProposal:
     def touch_set(self) -> frozenset[int]:
         return frozenset((int(self.source_cluster), int(self.target_cluster)))
 
+    def touch_ids(self) -> tuple[int, int]:
+        return (int(self.source_cluster), int(self.target_cluster))
+
 
 @dataclass(frozen=True)
 class BlockPeelProposal:
@@ -73,6 +82,9 @@ class BlockPeelProposal:
 
     def touch_set(self) -> frozenset[int]:
         return frozenset((int(self.source_cluster),))
+
+    def touch_ids(self) -> tuple[int]:
+        return (int(self.source_cluster),)
 
 
 @dataclass(frozen=True)
@@ -84,6 +96,9 @@ class BlockMoveProposal:
 
     def touch_set(self) -> frozenset[int]:
         return frozenset((int(self.source_cluster), int(self.target_cluster)))
+
+    def touch_ids(self) -> tuple[int, int]:
+        return (int(self.source_cluster), int(self.target_cluster))
 
 
 Proposal = (

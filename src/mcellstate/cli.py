@@ -85,7 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--preset",
         choices=FIT_PRESETS,
         default="balanced",
-        help="balanced is the default; cpu keeps the search on CPU; gpu reduces CPU-heavy refinement; gpu-full shifts harder toward GPU-scoreable proposals; quality is more exhaustive; benchmark matches comparison runs.",
+        help="balanced is the default; cpu keeps the search on CPU; gpu uses the GPU-oriented path; quality is more exhaustive; benchmark matches comparison runs.",
     )
     fit.add_argument(
         "--optimizer-mode",
@@ -165,6 +165,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Round cap for random-walk bad moves as a fraction of scored proposals.",
+    )
+    fit.add_argument(
+        "--proposal-batch-size",
+        type=int,
+        default=None,
+        help="Chunk size for proposal generation and scoring. Defaults are tuned automatically by optimizer mode.",
+    )
+    fit.add_argument(
+        "--cuda-chunk-size",
+        type=int,
+        default=None,
+        help="CUDA proposal-scoring chunk size; larger values keep the GPU busier but use more memory.",
     )
     fit.add_argument(
         "--recompute-ll-each-round",
@@ -283,7 +295,9 @@ def run_fit(args: argparse.Namespace) -> dict:
     optimizer_mode = str(args.optimizer_mode or preset["optimizer_mode"])
     effective_backend = str(args.backend)
     if effective_backend == "auto":
-        if args.preset in {"gpu", "gpu-full"}:
+        if optimizer_mode == Optimizer.CPU_ONLY_MODE:
+            effective_backend = "torch-cpu"
+        elif optimizer_mode == Optimizer.GPU_MODE or args.preset == "gpu":
             effective_backend = "cuda"
         else:
             effective_backend = "cpu"
@@ -320,6 +334,8 @@ def run_fit(args: argparse.Namespace) -> dict:
                     f"n_proposals={int(args.n_proposals)}",
                     f"max_scored_proposals={args.max_scored_proposals if args.max_scored_proposals is not None else 'auto'}",
                     f"random_proposals={args.random_proposals if args.random_proposals is not None else 'auto'}",
+                    f"proposal_batch_size={args.proposal_batch_size if args.proposal_batch_size is not None else 'auto'}",
+                    f"cuda_chunk_size={args.cuda_chunk_size if args.cuda_chunk_size is not None else 'auto'}",
                     f"proposal_workers={args.proposal_workers if args.proposal_workers is not None else 'auto'}",
                 ]
             ),
@@ -351,6 +367,8 @@ def run_fit(args: argparse.Namespace) -> dict:
         "random_proposals",
         "random_accept_prob",
         "random_accept_max_fraction",
+        "proposal_batch_size",
+        "cuda_chunk_size",
         "recompute_ll_each_round",
     ]:
         val = getattr(args, key)
@@ -409,6 +427,12 @@ def run_fit(args: argparse.Namespace) -> dict:
         "random_accept_max_fraction": float(
             optimizer.random_accept_max_fraction or 0.0
         ),
+        "proposal_batch_size": None
+        if optimizer.proposal_batch_size is None
+        else int(optimizer.proposal_batch_size),
+        "cuda_chunk_size": None
+        if optimizer.cuda_chunk_size is None
+        else int(optimizer.cuda_chunk_size),
         "recompute_ll_each_round": bool(optimizer.recompute_ll_each_round),
         "cuda_empty_cache": bool(optimizer.cuda_empty_cache),
         "target_clusters": int(target_clusters),

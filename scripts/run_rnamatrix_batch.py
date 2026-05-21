@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--preset",
-        choices=("balanced", "cpu", "gpu", "gpu-full", "quality", "benchmark"),
+        choices=("balanced", "cpu", "gpu", "quality", "benchmark"),
         default="gpu",
     )
     parser.add_argument(
@@ -72,6 +72,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(random_proposals=None)
     parser.add_argument("--random-accept-prob", type=float, default=None)
     parser.add_argument("--random-accept-max-fraction", type=float, default=None)
+    parser.add_argument("--proposal-batch-size", type=int, default=None)
+    parser.add_argument("--cuda-chunk-size", type=int, default=None)
     parser.add_argument(
         "--recompute-ll-each-round",
         dest="recompute_ll_each_round",
@@ -219,6 +221,16 @@ def main(argv: list[str] | None = None) -> int:
                             "--random-accept-max-fraction",
                             str(args.random_accept_max_fraction),
                         ]
+                    ),
+                    *(
+                        []
+                        if args.proposal_batch_size is None
+                        else ["--proposal-batch-size", str(args.proposal_batch_size)]
+                    ),
+                    *(
+                        []
+                        if args.cuda_chunk_size is None
+                        else ["--cuda-chunk-size", str(args.cuda_chunk_size)]
                     ),
                     *(
                         []

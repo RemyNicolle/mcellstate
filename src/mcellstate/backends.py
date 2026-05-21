@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -31,6 +32,19 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 _TORCH_CPU_THREADS_CONFIGURED: int | None = None
+
+
+@dataclass
+class _DeviceStateCache:
+    version: int
+    cluster_capacity: int
+    active_cluster_ids_tensor: torch.Tensor
+    active_cluster_lookup_tensor: torch.Tensor
+    active_cluster_count: int
+    cluster_sizes_tensor: torch.Tensor
+    z_tensor: torch.Tensor
+    cluster_matrix: torch.Tensor
+    cluster_totals: torch.Tensor
 
 
 def _proposal_is_valid(state: PartitionState, proposal: Proposal) -> bool:
@@ -251,7 +265,7 @@ class TorchDeviceBackend(CPUBackend):
         state: PartitionState,
         *,
         device: str,
-        chunk_size: int = 8192,
+        chunk_size: int | None = 8192,
         num_threads: int | None = None,
     ) -> None:
         global _TORCH_CPU_THREADS_CONFIGURED
@@ -263,13 +277,17 @@ class TorchDeviceBackend(CPUBackend):
                 _TORCH_CPU_THREADS_CONFIGURED = desired_threads
         super().__init__(psi, state, num_threads=num_threads)
         self.device = torch.device(device)
-        self.chunk_size = int(chunk_size)
+        self.chunk_size = (
+            None if chunk_size is None or int(chunk_size) <= 0 else int(chunk_size)
+        )
+        self._cuda_target_fraction = 0.0125
+        self._cuda_bytes_per_entry = 64.0
+        self._cuda_min_chunk_size = 512
+        self._cuda_max_chunk_size = 65_536
         self.psi0_tensor = torch.tensor(
             self.psi0, dtype=torch.float64, device=self.device
         )
 
-        # Initialize GPU-resident state variables
-        self.state_version = state.version
         self.psi_tensor = torch.tensor(
             self.psi, dtype=torch.float64, device=self.device
         )
@@ -289,38 +307,178 @@ class TorchDeviceBackend(CPUBackend):
             self.cell_ll, dtype=torch.float64, device=self.device
         )
 
-        capacity = max(1000, state.next_cluster_id + 2000)
-        self.cluster_capacity = capacity
-        self.cluster_matrix = torch.zeros(
-            (capacity, state.n_genes), dtype=torch.float64, device=self.device
+        self._state_cache = self._build_state_cache(state)
+        self.state_version = self._state_cache.version
+        self.cluster_capacity = self._state_cache.cluster_capacity
+        self.cluster_matrix = self._state_cache.cluster_matrix
+        self.cluster_totals = self._state_cache.cluster_totals
+        self.z_tensor = self._state_cache.z_tensor
+        self.cluster_sizes_tensor = self._state_cache.cluster_sizes_tensor
+        self.active_cluster_ids_tensor = self._state_cache.active_cluster_ids_tensor
+        self.active_cluster_lookup_tensor = (
+            self._state_cache.active_cluster_lookup_tensor
         )
-        self.cluster_totals = torch.zeros(
-            capacity, dtype=torch.float64, device=self.device
+
+    def _build_state_cache(self, state: PartitionState) -> _DeviceStateCache:
+        cluster_capacity = max(1000, state.next_cluster_id + 2000)
+        active_cluster_ids_np = state.active_cluster_array()
+        active_cluster_ids_tensor = torch.full(
+            (cluster_capacity,), -1, dtype=torch.int64, device=self.device
+        )
+        active_cluster_lookup_tensor = torch.full(
+            (cluster_capacity,), -1, dtype=torch.int64, device=self.device
+        )
+        active_cluster_count = int(active_cluster_ids_np.size)
+        if active_cluster_count:
+            active_tensor = torch.tensor(
+                active_cluster_ids_np, dtype=torch.int64, device=self.device
+            )
+            active_cluster_ids_tensor[:active_cluster_count] = active_tensor
+            active_cluster_lookup_tensor[active_tensor] = torch.arange(
+                active_cluster_count, dtype=torch.int64, device=self.device
+            )
+
+        cluster_sizes_tensor = torch.zeros(
+            cluster_capacity, dtype=torch.int64, device=self.device
+        )
+        z_tensor = torch.tensor(state.z, dtype=torch.int64, device=self.device)
+        cluster_matrix = torch.zeros(
+            (cluster_capacity, state.n_genes), dtype=torch.float64, device=self.device
+        )
+        cluster_totals = torch.zeros(
+            cluster_capacity, dtype=torch.float64, device=self.device
         )
         for cid, vector in state.clusters.items():
             genes, counts = vector.sorted_items()
+            cluster_sizes_tensor[cid] = len(state.cells_by_cluster[cid])
             if len(genes):
-                self.cluster_matrix[
+                cluster_matrix[
                     cid, torch.tensor(genes, dtype=torch.int64, device=self.device)
                 ] = torch.tensor(counts, dtype=torch.float64, device=self.device)
-            self.cluster_totals[cid] = float(vector.total)
+            cluster_totals[cid] = float(vector.total)
+
+        return _DeviceStateCache(
+            version=state.version,
+            cluster_capacity=cluster_capacity,
+            active_cluster_ids_tensor=active_cluster_ids_tensor,
+            active_cluster_lookup_tensor=active_cluster_lookup_tensor,
+            active_cluster_count=active_cluster_count,
+            cluster_sizes_tensor=cluster_sizes_tensor,
+            z_tensor=z_tensor,
+            cluster_matrix=cluster_matrix,
+            cluster_totals=cluster_totals,
+        )
 
     def _ensure_cluster_capacity(self, next_id: int) -> None:
-        if next_id >= self.cluster_capacity:
-            new_capacity = next_id + 2000
-            new_matrix = torch.zeros(
-                (new_capacity, self.cluster_matrix.shape[1]),
-                dtype=torch.float64,
-                device=self.device,
+        cache = self._state_cache
+        if next_id < cache.cluster_capacity:
+            return
+        new_capacity = next_id + 2000
+        new_active_ids = torch.full(
+            (new_capacity,), -1, dtype=torch.int64, device=self.device
+        )
+        new_active_ids[: cache.active_cluster_count] = cache.active_cluster_ids_tensor[
+            : cache.active_cluster_count
+        ]
+        new_lookup = torch.full(
+            (new_capacity,), -1, dtype=torch.int64, device=self.device
+        )
+        new_lookup[
+            : cache.active_cluster_lookup_tensor.shape[0]
+        ] = cache.active_cluster_lookup_tensor
+        new_sizes = torch.zeros(new_capacity, dtype=torch.int64, device=self.device)
+        new_sizes[: cache.cluster_sizes_tensor.shape[0]] = cache.cluster_sizes_tensor
+        new_matrix = torch.zeros(
+            (new_capacity, cache.cluster_matrix.shape[1]),
+            dtype=torch.float64,
+            device=self.device,
+        )
+        new_matrix[: cache.cluster_matrix.shape[0]] = cache.cluster_matrix
+        new_totals = torch.zeros(new_capacity, dtype=torch.float64, device=self.device)
+        new_totals[: cache.cluster_totals.shape[0]] = cache.cluster_totals
+
+        cache.cluster_capacity = new_capacity
+        cache.active_cluster_ids_tensor = new_active_ids
+        cache.active_cluster_lookup_tensor = new_lookup
+        cache.cluster_sizes_tensor = new_sizes
+        cache.cluster_matrix = new_matrix
+        cache.cluster_totals = new_totals
+
+        self.cluster_capacity = new_capacity
+        self.active_cluster_ids_tensor = new_active_ids
+        self.active_cluster_lookup_tensor = new_lookup
+        self.cluster_sizes_tensor = new_sizes
+        self.cluster_matrix = new_matrix
+        self.cluster_totals = new_totals
+
+    def _add_active_cluster(self, cluster_id: int) -> None:
+        cluster_id = int(cluster_id)
+        cache = self._state_cache
+        if cluster_id >= cache.cluster_capacity:
+            self._ensure_cluster_capacity(cluster_id + 1)
+            cache = self._state_cache
+        if int(cache.active_cluster_lookup_tensor[cluster_id].item()) >= 0:
+            return
+        pos = int(cache.active_cluster_count)
+        if pos >= cache.active_cluster_ids_tensor.shape[0]:
+            self._ensure_cluster_capacity(
+                max(cluster_id + 1, cache.cluster_capacity + 1)
             )
-            new_totals = torch.zeros(
-                new_capacity, dtype=torch.float64, device=self.device
-            )
-            new_matrix[: self.cluster_capacity] = self.cluster_matrix
-            new_totals[: self.cluster_capacity] = self.cluster_totals
-            self.cluster_matrix = new_matrix
-            self.cluster_totals = new_totals
-            self.cluster_capacity = new_capacity
+            cache = self._state_cache
+        cache.active_cluster_ids_tensor[pos] = cluster_id
+        cache.active_cluster_lookup_tensor[cluster_id] = pos
+        cache.active_cluster_count = pos + 1
+
+    def _remove_active_cluster(self, cluster_id: int) -> None:
+        cluster_id = int(cluster_id)
+        cache = self._state_cache
+        if cluster_id >= cache.active_cluster_lookup_tensor.shape[0]:
+            return
+        pos = int(cache.active_cluster_lookup_tensor[cluster_id].item())
+        if pos < 0:
+            return
+        last_pos = int(cache.active_cluster_count) - 1
+        last_cluster = int(cache.active_cluster_ids_tensor[last_pos].item())
+        if pos != last_pos:
+            cache.active_cluster_ids_tensor[pos] = last_cluster
+            cache.active_cluster_lookup_tensor[last_cluster] = pos
+        cache.active_cluster_ids_tensor[last_pos] = -1
+        cache.active_cluster_lookup_tensor[cluster_id] = -1
+        cache.active_cluster_count = last_pos
+
+    def _sync_state_cache(self, state: PartitionState) -> None:
+        if self.state_version == state.version:
+            return
+        self._ensure_cluster_capacity(state.next_cluster_id)
+        touched_clusters = {int(cid) for cid in state.last_touched_clusters}
+        for cid in touched_clusters:
+            if cid in state.active_cluster_ids:
+                self._add_active_cluster(cid)
+            else:
+                self._remove_active_cluster(cid)
+
+            if cid in state.active_cluster_ids:
+                vector = state.clusters[cid]
+                genes, counts = vector.sorted_items()
+                self.cluster_matrix[cid].zero_()
+                if len(genes):
+                    self.cluster_matrix[
+                        cid, torch.tensor(genes, dtype=torch.int64, device=self.device)
+                    ] = torch.tensor(counts, dtype=torch.float64, device=self.device)
+                self.cluster_totals[cid] = float(vector.total)
+                self.cluster_sizes_tensor[cid] = int(len(state.cells_by_cluster[cid]))
+                cells = torch.tensor(
+                    state.cells_by_cluster[cid].cells,
+                    dtype=torch.int64,
+                    device=self.device,
+                )
+                self.z_tensor[cells] = int(cid)
+            else:
+                self.cluster_matrix[cid].zero_()
+                self.cluster_totals[cid] = 0.0
+                self.cluster_sizes_tensor[cid] = 0
+        self.state_version = state.version
+        self._state_cache.version = state.version
 
     def score_batch(
         self, state: PartitionState, proposals: list[Proposal]
@@ -328,26 +486,7 @@ class TorchDeviceBackend(CPUBackend):
         if not proposals:
             return np.empty(0, dtype=np.float64)
 
-        # Automated state synchronization check
-        if self.state_version != state.version:
-            self._ensure_cluster_capacity(state.next_cluster_id)
-            for cid in state.last_touched_clusters:
-                if cid in state.active_cluster_ids:
-                    vector = state.clusters[cid]
-                    genes, counts = vector.sorted_items()
-                    self.cluster_matrix[cid].zero_()
-                    if len(genes):
-                        self.cluster_matrix[
-                            cid,
-                            torch.tensor(genes, dtype=torch.int64, device=self.device),
-                        ] = torch.tensor(
-                            counts, dtype=torch.float64, device=self.device
-                        )
-                    self.cluster_totals[cid] = float(vector.total)
-                else:
-                    self.cluster_matrix[cid].zero_()
-                    self.cluster_totals[cid] = 0.0
-            self.state_version = state.version
+        self._sync_state_cache(state)
 
         scores = np.full(len(proposals), -np.inf, dtype=np.float64)
         by_type: dict[str, list[tuple[int, Proposal]]] = defaultdict(list)
@@ -356,27 +495,355 @@ class TorchDeviceBackend(CPUBackend):
                 continue
             by_type[proposal.kind].append((idx, proposal))
 
-        for chunk in self._chunked(by_type.get("peel", [])):
+        for chunk in self._chunk_proposals(state, by_type.get("peel", [])):
             self._score_peels(state, chunk, scores)
-        for chunk in self._chunked(by_type.get("move", [])):
+        for chunk in self._chunk_proposals(state, by_type.get("move", [])):
             self._score_moves(state, chunk, scores)
-        for chunk in self._chunked(by_type.get("block_peel", [])):
+        for chunk in self._chunk_proposals(state, by_type.get("block_peel", [])):
             self._score_block_peels(state, chunk, scores)
-        for chunk in self._chunked(by_type.get("block_move", [])):
+        for chunk in self._chunk_proposals(state, by_type.get("block_move", [])):
             self._score_block_moves(state, chunk, scores)
-        for chunk in self._chunked(by_type.get("merge", [])):
+        for chunk in self._chunk_proposals(state, by_type.get("merge", [])):
             self._score_merges(state, chunk, scores)
         return scores
+
+    def sample_random_proposals(
+        self,
+        state: PartitionState,
+        n_proposals: int,
+        *,
+        family_weights: np.ndarray,
+        max_unique_proposals: int | None = None,
+        seed: int | None = None,
+    ) -> list[Proposal]:
+        if n_proposals <= 0:
+            return []
+        if torch is None:
+            return []
+
+        weights = np.asarray(family_weights, dtype=np.float64)
+        if weights.shape != (5,):
+            raise ValueError("family_weights must have five entries")
+        if np.any(weights < 0.0) or float(weights.sum()) <= 0.0:
+            raise ValueError("family weights must be non-negative with positive mass")
+        weights = weights / float(weights.sum())
+
+        rng = np.random.default_rng(seed)
+        draw_seed = int(rng.integers(np.iinfo(np.int64).max))
+        generator = torch.Generator(device=str(self.device))
+        generator.manual_seed(draw_seed)
+
+        counts = np.asarray(rng.multinomial(int(n_proposals), weights), dtype=np.int64)
+        merge_count, peel_count, move_count = (
+            int(counts[0]),
+            int(counts[1]),
+            int(counts[2]),
+        )
+
+        self._sync_state_cache(state)
+        cache = self._state_cache
+        if cache.active_cluster_count == 0:
+            return []
+
+        active_clusters = cache.active_cluster_ids_tensor[: cache.active_cluster_count]
+        n_active = int(cache.active_cluster_count)
+        cluster_lookup = cache.active_cluster_lookup_tensor
+        cluster_sizes = cache.cluster_sizes_tensor
+        z_tensor = cache.z_tensor
+
+        records: list[torch.Tensor] = []
+
+        if merge_count > 0 and n_active >= 2:
+            first = torch.randint(
+                n_active, (merge_count,), generator=generator, device=self.device
+            )
+            second = torch.randint(
+                n_active - 1,
+                (merge_count,),
+                generator=generator,
+                device=self.device,
+            )
+            second = second + (second >= first).to(second.dtype)
+            cluster_a = torch.minimum(active_clusters[first], active_clusters[second])
+            cluster_b = torch.maximum(active_clusters[first], active_clusters[second])
+            kind = torch.zeros_like(cluster_a)
+            sentinel = torch.full_like(cluster_a, -1)
+            records.append(torch.stack((kind, cluster_a, cluster_b, sentinel), dim=1))
+
+        if peel_count > 0 and state.n_cells > 0:
+            draws = max(peel_count * 2, peel_count + 32)
+            cell_ids = torch.randint(
+                state.n_cells, (draws,), generator=generator, device=self.device
+            )
+            source = z_tensor[cell_ids]
+            valid = cluster_sizes[source] > 1
+            if torch.any(valid):
+                cell_ids = cell_ids[valid]
+                source = source[valid]
+                if cell_ids.numel() > peel_count:
+                    perm = torch.randperm(
+                        cell_ids.numel(), generator=generator, device=self.device
+                    )[:peel_count]
+                    cell_ids = cell_ids.index_select(0, perm)
+                    source = source.index_select(0, perm)
+                kind = torch.ones_like(cell_ids)
+                sentinel = torch.full_like(cell_ids, -1)
+                records.append(torch.stack((kind, cell_ids, source, sentinel), dim=1))
+
+        if move_count > 0 and n_active >= 2 and state.n_cells > 0:
+            cell_ids = torch.randint(
+                state.n_cells, (move_count,), generator=generator, device=self.device
+            )
+            source = z_tensor[cell_ids]
+            source_pos = cluster_lookup[source]
+            valid = source_pos >= 0
+            if torch.any(valid):
+                cell_ids = cell_ids[valid]
+                source = source[valid]
+                source_pos = source_pos[valid]
+                target_pos = torch.randint(
+                    n_active - 1,
+                    (cell_ids.numel(),),
+                    generator=generator,
+                    device=self.device,
+                )
+                target_pos = target_pos + (target_pos >= source_pos).to(
+                    target_pos.dtype
+                )
+                target = active_clusters[target_pos]
+                kind = torch.full_like(cell_ids, 2)
+                records.append(torch.stack((kind, cell_ids, source, target), dim=1))
+
+        if not records:
+            return []
+
+        merged = torch.cat(records, dim=0)
+        if merged.numel() == 0:
+            return []
+        merged = torch.unique(merged, dim=0)
+        if (
+            max_unique_proposals is not None
+            and int(max_unique_proposals) > 0
+            and merged.size(0) > int(max_unique_proposals)
+        ):
+            keep = torch.randperm(
+                merged.size(0), generator=generator, device=self.device
+            )[: int(max_unique_proposals)]
+            merged = merged.index_select(0, keep)
+
+        proposals: list[Proposal] = []
+        for row in merged.to("cpu").tolist():
+            kind, a, b, c = (int(row[0]), int(row[1]), int(row[2]), int(row[3]))
+            if kind == 0:
+                proposals.append(MergeProposal(cluster_a=a, cluster_b=b))
+            elif kind == 1:
+                proposals.append(PeelProposal(cell=a, source_cluster=b))
+            elif kind == 2:
+                proposals.append(
+                    MoveProposal(cell=a, source_cluster=b, target_cluster=c)
+                )
+        return proposals
+
+    def select_nonconflicting_candidates(self, candidates: list[dict]) -> list[dict]:
+        if not candidates:
+            return []
+        if torch is None:
+            return list(candidates)
+
+        touch_pairs: list[tuple[int, int]] = []
+        scores = torch.empty(len(candidates), dtype=torch.float64, device=self.device)
+        max_touch_id = -1
+        for idx, candidate in enumerate(candidates):
+            scores[idx] = float(candidate["delta"])
+            touch_ids = candidate.get("touch_ids")
+            if touch_ids is None:
+                touch_ids = tuple(sorted(int(x) for x in candidate["touch_set"]))
+            if not touch_ids:
+                touch_pairs.append((-1, -1))
+                continue
+            first = int(touch_ids[0])
+            second = int(touch_ids[1]) if len(touch_ids) > 1 else -1
+            touch_pairs.append((first, second))
+            if first >= 0:
+                max_touch_id = max(max_touch_id, first)
+            if second >= 0:
+                max_touch_id = max(max_touch_id, second)
+
+        if max_touch_id < 0:
+            return []
+
+        cluster_capacity = max(self.cluster_capacity, max_touch_id + 1)
+        touch_tensor = torch.tensor(touch_pairs, dtype=torch.int64, device=self.device)
+        touch_a = touch_tensor[:, 0]
+        touch_b = touch_tensor[:, 1]
+        finite = torch.isfinite(scores)
+        if not torch.any(finite):
+            return []
+
+        order = torch.argsort(scores, descending=True, stable=True)
+        ranks = torch.empty_like(order)
+        ranks[order] = torch.arange(
+            len(candidates), dtype=torch.int64, device=self.device
+        )
+
+        remaining = finite.clone()
+        accepted = torch.zeros(len(candidates), dtype=torch.bool, device=self.device)
+        occupied = torch.zeros(cluster_capacity, dtype=torch.bool, device=self.device)
+
+        while True:
+            visible = remaining.clone()
+            if torch.any(occupied):
+                blocked = torch.zeros_like(visible)
+                valid_a = touch_a >= 0
+                if torch.any(valid_a):
+                    blocked[valid_a] |= occupied[touch_a[valid_a]]
+                valid_b = touch_b >= 0
+                if torch.any(valid_b):
+                    blocked[valid_b] |= occupied[touch_b[valid_b]]
+                visible &= ~blocked
+                remaining &= ~blocked
+            if not torch.any(visible):
+                break
+
+            visible_ranks = ranks[visible]
+            visible_touches = touch_tensor[visible]
+            flat_ids = visible_touches.reshape(-1)
+            flat_valid = flat_ids >= 0
+            if not torch.any(flat_valid):
+                break
+            flat_ranks = visible_ranks.repeat_interleave(2)[flat_valid]
+            cluster_best = torch.full(
+                (cluster_capacity,),
+                len(candidates),
+                dtype=torch.int64,
+                device=self.device,
+            )
+            cluster_best.scatter_reduce_(
+                0, flat_ids[flat_valid], flat_ranks, reduce="amin", include_self=True
+            )
+
+            best_a = torch.ones_like(visible, dtype=torch.bool)
+            valid_a = touch_a >= 0
+            if torch.any(valid_a):
+                best_a[valid_a] = ranks[valid_a] == cluster_best[touch_a[valid_a]]
+            best_b = torch.ones_like(visible, dtype=torch.bool)
+            valid_b = touch_b >= 0
+            if torch.any(valid_b):
+                best_b[valid_b] = ranks[valid_b] == cluster_best[touch_b[valid_b]]
+
+            accept_now = visible & best_a & best_b
+            if not torch.any(accept_now):
+                break
+
+            accepted |= accept_now
+            remaining[accept_now] = False
+
+            accepted_touches = touch_tensor[accept_now]
+            accepted_flat = accepted_touches.reshape(-1)
+            accepted_valid = accepted_flat >= 0
+            if torch.any(accepted_valid):
+                occupied[accepted_flat[accepted_valid]] = True
+
+        accepted_indices = torch.nonzero(accepted, as_tuple=False).flatten()
+        if accepted_indices.numel() == 0:
+            return []
+        accepted_indices = accepted_indices[
+            torch.argsort(ranks.index_select(0, accepted_indices))
+        ]
+        return [candidates[int(idx)] for idx in accepted_indices.tolist()]
 
     def _chunked(
         self, indexed: list[tuple[int, Proposal]]
     ) -> list[list[tuple[int, Proposal]]]:
         if not indexed:
             return []
+        chunk_size = int(self.chunk_size) if self.chunk_size is not None else 8192
         return [
-            indexed[start : start + self.chunk_size]
-            for start in range(0, len(indexed), self.chunk_size)
+            indexed[start : start + chunk_size]
+            for start in range(0, len(indexed), chunk_size)
         ]
+
+    def _proposal_width(self, state: PartitionState, proposal: Proposal) -> int:
+        if isinstance(proposal, MergeProposal):
+            vector_a = state.clusters[proposal.cluster_a]
+            vector_b = state.clusters[proposal.cluster_b]
+            return int(min(vector_a.nnz, vector_b.nnz))
+        if isinstance(proposal, PeelProposal):
+            return int(state.cell_nnz[int(proposal.cell)])
+        if isinstance(proposal, MoveProposal):
+            return int(state.cell_nnz[int(proposal.cell)])
+        if isinstance(proposal, BlockPeelProposal):
+            return int(proposal.block.indices.size)
+        if isinstance(proposal, BlockMoveProposal):
+            return int(proposal.block.indices.size)
+        return 1
+
+    def _cuda_memory_info(self) -> tuple[int, int] | None:
+        if self.device.type != "cuda" or torch is None or not torch.cuda.is_available():
+            return None
+        try:
+            free_bytes, total_bytes = torch.cuda.mem_get_info(self.device)
+        except TypeError:  # pragma: no cover - older torch variants
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+        except Exception:  # pragma: no cover - defensive
+            return None
+        return int(free_bytes), int(total_bytes)
+
+    def _adaptive_chunk_size(
+        self,
+        width: int,
+        *,
+        memory_info: tuple[int, int] | None = None,
+    ) -> int:
+        if self.chunk_size is not None:
+            return int(self.chunk_size)
+        width = max(1, int(width))
+        if memory_info is None:
+            target_entries = 1_048_576
+        else:
+            free_bytes, _ = memory_info
+            target_entries = int(
+                max(
+                    131_072,
+                    min(
+                        4_194_304,
+                        (free_bytes * self._cuda_target_fraction)
+                        / self._cuda_bytes_per_entry,
+                    ),
+                )
+            )
+        chunk_size = max(1, target_entries // width)
+        return int(
+            max(
+                self._cuda_min_chunk_size,
+                min(self._cuda_max_chunk_size, chunk_size),
+            )
+        )
+
+    def _chunk_proposals(
+        self, state: PartitionState, indexed: list[tuple[int, Proposal]]
+    ) -> list[list[tuple[int, Proposal]]]:
+        if not indexed:
+            return []
+        if self.chunk_size is not None or self.device.type != "cuda":
+            return self._chunked(indexed)
+        memory_info = self._cuda_memory_info()
+        annotated = [
+            (idx, proposal, self._proposal_width(state, proposal))
+            for idx, proposal in indexed
+        ]
+        annotated.sort(key=lambda item: item[2], reverse=True)
+        chunks: list[list[tuple[int, Proposal]]] = []
+        start = 0
+        while start < len(annotated):
+            width = int(annotated[start][2])
+            chunk_size = self._adaptive_chunk_size(width, memory_info=memory_info)
+            end = min(len(annotated), start + chunk_size)
+            chunks.append(
+                [(idx, proposal) for idx, proposal, _ in annotated[start:end]]
+            )
+            start = end
+        return chunks
 
     def _score_peels(
         self,
@@ -861,7 +1328,7 @@ class TorchCudaBackend(TorchDeviceBackend):
         psi: np.ndarray,
         state: PartitionState,
         *,
-        chunk_size: int = 8192,
+        chunk_size: int | None = None,
         num_threads: int | None = None,
     ) -> None:
         super().__init__(
@@ -879,7 +1346,7 @@ class TorchCPUBackend(TorchDeviceBackend):
         psi: np.ndarray,
         state: PartitionState,
         *,
-        chunk_size: int = 8192,
+        chunk_size: int | None = 8192,
         num_threads: int | None = None,
     ) -> None:
         super().__init__(
@@ -893,6 +1360,7 @@ def make_backend(
     state: PartitionState,
     *,
     num_threads: int | None = None,
+    chunk_size: int | None = None,
 ) -> CPUBackend:
     backend = backend.lower()
     if backend in {"cpu", "numpy"}:
@@ -900,10 +1368,20 @@ def make_backend(
     if backend in {"torch-cpu", "cpu-torch", "torch"}:
         return TorchCPUBackend(psi, state, num_threads=num_threads)
     if backend == "cuda":
-        return TorchCudaBackend(psi, state, num_threads=num_threads)
+        return TorchCudaBackend(
+            psi,
+            state,
+            num_threads=num_threads,
+            chunk_size=None if chunk_size is None else int(chunk_size),
+        )
     if backend == "auto":
         if _torch_device_available("cuda") and _torch_device_supports_float64("cuda"):
-            return TorchCudaBackend(psi, state, num_threads=num_threads)
+            return TorchCudaBackend(
+                psi,
+                state,
+                num_threads=num_threads,
+                chunk_size=None if chunk_size is None else int(chunk_size),
+            )
         if torch is not None:
             return TorchCPUBackend(psi, state, num_threads=num_threads)
         return CPUBackend(psi, state)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import os
 import time
@@ -34,10 +35,9 @@ class FitResult:
 
 class Optimizer:
     EFFECTIVE_MODE = "effective"
-    GPU_HEAVY_MODE = "gpu-heavy"
-    GPU_FULL_MODE = "gpu-full"
+    GPU_MODE = "gpu"
     CPU_ONLY_MODE = "cpu-only"
-    OPTIMIZER_MODES = (EFFECTIVE_MODE, GPU_HEAVY_MODE, GPU_FULL_MODE, CPU_ONLY_MODE)
+    OPTIMIZER_MODES = (EFFECTIVE_MODE, GPU_MODE, CPU_ONLY_MODE)
 
     def __init__(
         self,
@@ -97,6 +97,8 @@ class Optimizer:
         max_scored_proposals: int | None = None,
         random_accept_prob: float | None = None,
         random_accept_max_fraction: float | None = None,
+        proposal_batch_size: int | None = None,
+        cuda_chunk_size: int | None = None,
         recompute_ll_each_round: bool | None = None,
         cuda_empty_cache: bool = False,
     ) -> None:
@@ -160,6 +162,17 @@ class Optimizer:
             if random_accept_max_fraction is None
             else max(0.0, float(random_accept_max_fraction))
         )
+        self.proposal_batch_size = (
+            None
+            if proposal_batch_size is None or int(proposal_batch_size) <= 0
+            else int(proposal_batch_size)
+        )
+        self._proposal_batch_size_locked = self.proposal_batch_size is not None
+        self.cuda_chunk_size = (
+            None
+            if cuda_chunk_size is None or int(cuda_chunk_size) <= 0
+            else int(cuda_chunk_size)
+        )
         self.recompute_ll_each_round = (
             None if recompute_ll_each_round is None else bool(recompute_ll_each_round)
         )
@@ -209,10 +222,17 @@ class Optimizer:
                 self.random_accept_prob = 0.0
             if self.random_accept_max_fraction is None:
                 self.random_accept_max_fraction = 0.0
+            if self.proposal_batch_size is None:
+                self.proposal_batch_size = min(
+                    int(self.n_proposals),
+                    max(4096, min(16_384, int(max(self.n_proposals // 8, 4096)))),
+                )
             if self.recompute_ll_each_round is None:
                 self.recompute_ll_each_round = True
+            if self.cuda_chunk_size is None:
+                self.cuda_chunk_size = 8192
             return
-        if self.optimizer_mode in {self.GPU_HEAVY_MODE, self.GPU_FULL_MODE}:
+        if self.optimizer_mode == self.GPU_MODE:
             self.full_merge_stage = False
             self.greedy_merge_sweeps = 0
             self.exact_cell_reassign_passes = 0
@@ -221,17 +241,22 @@ class Optimizer:
             self.perturb_steps = 0
             self.serial_refine_passes = 0
             if self.proposal_workers is None:
-                self.proposal_workers = max(2, min(8, os.cpu_count() or 2))
+                self.proposal_workers = max(2, min(32, os.cpu_count() or 2))
             if self.backend_threads is None:
-                self.backend_threads = max(2, min(16, os.cpu_count() or 2))
+                self.backend_threads = max(4, min(32, os.cpu_count() or 4))
             if self.random_proposals is None:
                 self.random_proposals = True
             if self.max_scored_proposals is None:
-                self.max_scored_proposals = min(self.n_proposals, 25_000)
+                self.max_scored_proposals = int(self.n_proposals)
             if self.random_accept_prob is None:
                 self.random_accept_prob = 0.002
             if self.random_accept_max_fraction is None:
                 self.random_accept_max_fraction = 0.002
+            if self.proposal_batch_size is None:
+                self.proposal_batch_size = min(
+                    int(self.n_proposals),
+                    max(8192, min(32_768, int(max(self.n_proposals // 4, 8192)))),
+                )
             if self.recompute_ll_each_round is None:
                 self.recompute_ll_each_round = False
             return
@@ -246,8 +271,15 @@ class Optimizer:
                 self.random_accept_prob = 0.0
             if self.random_accept_max_fraction is None:
                 self.random_accept_max_fraction = 0.0
+            if self.proposal_batch_size is None:
+                self.proposal_batch_size = min(
+                    int(self.n_proposals),
+                    max(4096, min(16_384, int(max(self.n_proposals // 8, 4096)))),
+                )
             if self.recompute_ll_each_round is None:
                 self.recompute_ll_each_round = True
+            if self.cuda_chunk_size is None:
+                self.cuda_chunk_size = 8192
             return
 
     def fit(
@@ -285,7 +317,11 @@ class Optimizer:
                 else None
             )
             backend = make_backend(
-                self.backend_name, psi, state, num_threads=self.backend_threads
+                self.backend_name,
+                psi,
+                state,
+                num_threads=self.backend_threads,
+                chunk_size=self.cuda_chunk_size,
             )
             history: list[dict] = []
             current_ll = state.total_log_likelihood_cached(psi)
@@ -387,21 +423,32 @@ class Optimizer:
                         stage=stage,
                         message=f"sample {self.n_proposals} proposals",
                     )
-                proposals = self.sampler.sample_batch(state, self.n_proposals)
-                timing["proposal_s"] = time.perf_counter() - timer
-                timer = time.perf_counter()
+                (
+                    proposals,
+                    scores,
+                    proposal_s,
+                    scoring_s,
+                    proposal_chunks,
+                ) = self._sample_and_score_proposals(state, backend)
+                timing["proposal_s"] = proposal_s
+                timing["scoring_s"] = scoring_s
                 if verbose:
                     self._emit_verbose(
                         stream=verbose_stream,
                         restart=restart,
                         round_idx=round_idx,
                         stage=stage,
-                        message=f"score {len(proposals)} proposals on {self.backend_name}",
+                        message=(
+                            f"score {len(proposals)} proposals on {self.backend_name} "
+                            f"in {proposal_chunks} chunks"
+                        ),
                     )
-                scores = backend.score_batch(state, proposals)
-                if self.cuda_empty_cache:
-                    self._empty_cuda_cache()
-                timing["scoring_s"] = time.perf_counter() - timer
+                self._adapt_proposal_batch_size(
+                    chunk_count=proposal_chunks,
+                    proposal_s=proposal_s,
+                    scoring_s=scoring_s,
+                    backend=backend,
+                )
                 timer = time.perf_counter()
                 if verbose:
                     self._emit_verbose(
@@ -411,7 +458,9 @@ class Optimizer:
                         stage=stage,
                         message="select non-conflicting proposals",
                     )
-                accepted = self._select_positive_nonconflicting(proposals, scores)
+                accepted = self._select_positive_nonconflicting(
+                    proposals, scores, backend=backend
+                )
                 timing["conflict_s"] = time.perf_counter() - timer
                 accepted_delta = float(sum(item["delta"] for item in accepted))
                 random_walk_accepted = int(
@@ -425,6 +474,10 @@ class Optimizer:
                     "restart": restart,
                     "round": round_idx,
                     "stage": stage,
+                    "proposal_chunks": int(proposal_chunks),
+                    "proposal_batch_size": None
+                    if self.proposal_batch_size is None
+                    else int(self.proposal_batch_size),
                     "family_weights": dict(
                         zip(
                             self.sampler.family_names,
@@ -578,7 +631,11 @@ class Optimizer:
                     _, psi, current_ll = optimize_tau(state, psi)
                     state.initialize_likelihood_cache(psi)
                     backend = make_backend(
-                        self.backend_name, psi, state, num_threads=self.backend_threads
+                        self.backend_name,
+                        psi,
+                        state,
+                        num_threads=self.backend_threads,
+                        chunk_size=self.cuda_chunk_size,
                     )
                     self.sampler.set_scoring_context(psi)
                     tau_update = {"updated": True, "delta": float(current_ll - old_ll)}
@@ -785,6 +842,133 @@ class Optimizer:
             return full_partition_log_likelihood(state, psi)
         return float(round_before_ll + float(total_delta))
 
+    def _proposal_chunk_sizes(self, total: int) -> list[int]:
+        total = max(0, int(total))
+        if total <= 0:
+            return []
+        batch_size = (
+            total
+            if self.proposal_batch_size is None
+            else max(1, int(self.proposal_batch_size))
+        )
+        if batch_size >= total:
+            return [total]
+        counts: list[int] = []
+        remaining = total
+        while remaining > 0:
+            count = min(batch_size, remaining)
+            counts.append(count)
+            remaining -= count
+        return counts
+
+    def _sample_proposal_chunk(
+        self,
+        state: PartitionState,
+        backend,
+        count: int,
+        seed: int,
+    ) -> list[Proposal]:
+        count = int(count)
+        if count <= 0:
+            return []
+        if self.optimizer_mode == self.GPU_MODE and self.random_proposals:
+            backend_sampler = getattr(backend, "sample_random_proposals", None)
+            if backend_sampler is not None:
+                return backend_sampler(
+                    state,
+                    count,
+                    family_weights=self.sampler.family_weights,
+                    max_unique_proposals=self.max_scored_proposals,
+                    seed=seed,
+                )
+        self.sampler.prepare_round(state)
+        return self.sampler.sample_batch(state, count)
+
+    def _sample_and_score_proposals(
+        self, state: PartitionState, backend
+    ) -> tuple[list[Proposal], np.ndarray, float, float, int]:
+        chunk_sizes = self._proposal_chunk_sizes(self.n_proposals)
+        if not chunk_sizes:
+            return [], np.empty(0, dtype=np.float64), 0.0, 0.0, 0
+
+        proposal_batches: list[list[Proposal]] = []
+        score_batches: list[np.ndarray] = []
+        proposal_s = 0.0
+        scoring_s = 0.0
+        seeds = self.rng.integers(
+            np.iinfo(np.int64).max, size=len(chunk_sizes), dtype=np.int64
+        )
+
+        if len(chunk_sizes) == 1:
+            start = time.perf_counter()
+            batch = self._sample_proposal_chunk(
+                state, backend, chunk_sizes[0], int(seeds[0])
+            )
+            proposal_s += time.perf_counter() - start
+            start = time.perf_counter()
+            score_batch = backend.score_batch(state, batch)
+            if self.cuda_empty_cache:
+                self._empty_cuda_cache()
+            scoring_s += time.perf_counter() - start
+            return batch, score_batch, proposal_s, scoring_s, 1
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                self._sample_proposal_chunk,
+                state,
+                backend,
+                chunk_sizes[0],
+                int(seeds[0]),
+            )
+            for idx, count in enumerate(chunk_sizes):
+                start = time.perf_counter()
+                batch = future.result()
+                proposal_s += time.perf_counter() - start
+                if idx + 1 < len(chunk_sizes):
+                    future = executor.submit(
+                        self._sample_proposal_chunk,
+                        state,
+                        backend,
+                        chunk_sizes[idx + 1],
+                        int(seeds[idx + 1]),
+                    )
+                start = time.perf_counter()
+                score_batch = backend.score_batch(state, batch)
+                if self.cuda_empty_cache:
+                    self._empty_cuda_cache()
+                scoring_s += time.perf_counter() - start
+                proposal_batches.append(batch)
+                score_batches.append(score_batch)
+
+        proposals = [proposal for batch in proposal_batches for proposal in batch]
+        scores = (
+            np.concatenate(score_batches)
+            if score_batches
+            else np.empty(0, dtype=np.float64)
+        )
+        return proposals, scores, proposal_s, scoring_s, len(chunk_sizes)
+
+    def _adapt_proposal_batch_size(
+        self, *, chunk_count: int, proposal_s: float, scoring_s: float, backend
+    ) -> None:
+        if self._proposal_batch_size_locked:
+            return
+        if self.proposal_batch_size is None:
+            return
+        if chunk_count <= 1:
+            return
+        current = max(1, int(self.proposal_batch_size))
+        should_grow = chunk_count > 4 or proposal_s > 1.5 * scoring_s
+        if should_grow:
+            current = min(int(self.n_proposals), max(current + 1, current * 2))
+        elif (
+            getattr(backend, "device", None) is not None
+            and getattr(backend.device, "type", None) == "cuda"
+            and current < int(self.n_proposals)
+        ):
+            current = min(int(self.n_proposals), max(current + 1, current * 2))
+        self.proposal_batch_size = current
+
     def _make_restart_state(
         self,
         restart: int,
@@ -821,17 +1005,8 @@ class Optimizer:
         return max(1, min(self.initial_state.n_cells, target))
 
     def _configure_stage(self, state: PartitionState, stage: str) -> None:
-        if self.optimizer_mode == self.GPU_FULL_MODE:
-            self.sampler.set_family_weights(
-                merge=0.86,
-                peel=0.09,
-                move=0.05,
-                block_peel=0.0,
-                block_move=0.0,
-            )
-            return
-        if self.optimizer_mode == self.GPU_HEAVY_MODE:
-            self.sampler.set_family_weights(**self._gpu_heavy_stage_weights(stage))
+        if self.optimizer_mode == self.GPU_MODE:
+            self.sampler.set_family_weights(**self._gpu_stage_weights(stage))
             return
         if self.optimizer_mode == self.CPU_ONLY_MODE:
             self.sampler.set_family_weights(
@@ -848,7 +1023,7 @@ class Optimizer:
         del state
         self.sampler.set_family_weights(**self._stage_weights(stage))
 
-    def _gpu_heavy_stage_weights(self, stage: str) -> dict[str, float]:
+    def _gpu_stage_weights(self, stage: str) -> dict[str, float]:
         if stage == "coarsen":
             return {
                 "merge": 0.75,
@@ -917,10 +1092,14 @@ class Optimizer:
         self,
         proposals: list[Proposal],
         scores: np.ndarray,
+        *,
+        backend=None,
     ) -> list[dict]:
         candidates = self._positive_candidates(proposals, scores)
         candidates.extend(self._random_walk_candidates(proposals, scores))
-        return self._select_positive_nonconflicting_candidates(candidates)
+        return self._select_positive_nonconflicting_candidates(
+            candidates, backend=backend
+        )
 
     def _positive_candidates(
         self, proposals: list[Proposal], scores: np.ndarray
@@ -930,6 +1109,7 @@ class Optimizer:
                 "proposal": proposal,
                 "delta": float(delta),
                 "touch_set": proposal.touch_set(),
+                "touch_ids": proposal.touch_ids(),
             }
             for proposal, delta in zip(proposals, scores, strict=True)
             if delta > 0.0 and np.isfinite(delta)
@@ -966,6 +1146,7 @@ class Optimizer:
                     "proposal": proposal,
                     "delta": delta,
                     "touch_set": proposal.touch_set(),
+                    "touch_ids": proposal.touch_ids(),
                     "random_walk": True,
                 },
             )
@@ -976,8 +1157,14 @@ class Optimizer:
         return [selected[int(idx)] for idx in keep.tolist()]
 
     def _select_positive_nonconflicting_candidates(
-        self, candidates: list[dict]
+        self, candidates: list[dict], *, backend=None
     ) -> list[dict]:
+        if backend is not None:
+            backend_selector = getattr(
+                backend, "select_nonconflicting_candidates", None
+            )
+            if backend_selector is not None:
+                return backend_selector(candidates)
         candidates.sort(key=lambda item: item["delta"], reverse=True)
 
         accepted: list[dict] = []
@@ -1013,7 +1200,9 @@ class Optimizer:
             candidates = self._score_all_merge_candidates(state, backend)
             if not candidates:
                 break
-            accepted = self._select_positive_nonconflicting_candidates(candidates)
+            accepted = self._select_positive_nonconflicting_candidates(
+                candidates, backend=backend
+            )
             if not accepted:
                 break
             self._assert_disjoint_touch_sets(accepted)
@@ -1082,7 +1271,9 @@ class Optimizer:
             if not proposals:
                 break
             scores = backend.score_batch(state, proposals)
-            accepted = self._select_positive_nonconflicting(proposals, scores)
+            accepted = self._select_positive_nonconflicting(
+                proposals, scores, backend=backend
+            )
             if not accepted:
                 break
             self._assert_disjoint_touch_sets(accepted)
@@ -1269,7 +1460,9 @@ class Optimizer:
             if not proposals:
                 break
             scores = backend.score_batch(state, proposals)
-            accepted = self._select_positive_nonconflicting(proposals, scores)
+            accepted = self._select_positive_nonconflicting(
+                proposals, scores, backend=backend
+            )
             if not accepted:
                 break
             self._assert_disjoint_touch_sets(accepted)
