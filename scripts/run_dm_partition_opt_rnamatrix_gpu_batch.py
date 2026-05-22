@@ -60,11 +60,12 @@ def run_fit(
     npz_path: Path,
     labels_path: Path,
     *,
-    optimizer_mode: str,
+    preset: str,
+    optimizer_mode: str | None,
     backend: str,
     proposal_workers: int | None,
     seed: int,
-    restarts: int,
+    restarts: int | None,
     n_proposals: int,
     max_scored_proposals: int | None,
     random_proposals: bool | None,
@@ -75,9 +76,9 @@ def run_fit(
     recompute_ll_each_round: bool | None,
     cuda_empty_cache: bool,
     max_rounds: int,
-    stall_rounds: int,
-    improvement_window: int,
-    eta: float,
+    stall_rounds: int | None,
+    improvement_window: int | None,
+    eta: float | None,
     overwrite: bool,
     progress: bool,
     verbose: bool,
@@ -99,8 +100,8 @@ def run_fit(
         str(labels_path),
         "--summary-json",
         str(summary_path),
-        "--optimizer-mode",
-        optimizer_mode,
+        *(["--optimizer-mode", optimizer_mode] if optimizer_mode is not None else []),
+        *(["--preset", preset] if optimizer_mode is None else []),
         "--backend",
         backend,
         *(
@@ -110,8 +111,7 @@ def run_fit(
         ),
         "--seed",
         str(seed),
-        "--restarts",
-        str(restarts),
+        *([] if restarts is None else ["--restarts", str(restarts)]),
         "--n-proposals",
         str(n_proposals),
         *(
@@ -158,12 +158,13 @@ def run_fit(
         *(["--cuda-empty-cache"] if cuda_empty_cache else []),
         "--max-rounds",
         str(max_rounds),
-        "--stall-rounds",
-        str(stall_rounds),
-        "--improvement-window",
-        str(improvement_window),
-        "--eta",
-        str(eta),
+        *([] if stall_rounds is None else ["--stall-rounds", str(stall_rounds)]),
+        *(
+            []
+            if improvement_window is None
+            else ["--improvement-window", str(improvement_window)]
+        ),
+        *([] if eta is None else ["--eta", str(eta)]),
     ]
     if progress:
         cmd.append("--progress")
@@ -196,10 +197,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory for converted NPZ matrices.",
     )
     parser.add_argument(
-        "--optimizer-mode",
+        "--preset",
+        choices=("balanced", "cpu", "gpu", "quality", "benchmark"),
         default="gpu",
+        help="Fit preset. Defaults to gpu, which now uses the structured CUDA search when backend=cuda.",
+    )
+    parser.add_argument(
+        "--optimizer-mode",
+        default=None,
         choices=("effective", "gpu", "cpu-only"),
-        help="effective keeps the current mixed search; gpu uses the GPU-oriented path; cpu-only keeps execution on CPU backends.",
+        help="Legacy low-level override. Prefer --preset; --optimizer-mode gpu keeps the legacy weak GPU search policy.",
     )
     parser.add_argument(
         "--backend", default="cuda", help="mcellstate backend. Use cuda for GPU."
@@ -211,9 +218,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Parallel proposal-family worker count. Defaults to the optimizer preset when omitted.",
     )
     parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--restarts", type=int, default=1)
+    parser.add_argument(
+        "--restarts",
+        type=int,
+        default=None,
+        help="Restart count. Omit to use the preset default; gpu preset currently defaults to multiple restarts.",
+    )
     parser.add_argument("--n-proposals", type=int, default=100_000)
-    parser.add_argument("--max-scored-proposals", type=int, default=25_000)
+    parser.add_argument(
+        "--max-scored-proposals",
+        type=int,
+        default=None,
+        help="Optional cap after deduplication. Omit to use the preset/backend default.",
+    )
     parser.add_argument(
         "--random-proposals", dest="random_proposals", action="store_true"
     )
@@ -235,12 +252,27 @@ def build_parser() -> argparse.ArgumentParser:
         dest="recompute_ll_each_round",
         action="store_false",
     )
-    parser.set_defaults(recompute_ll_each_round=False)
+    parser.set_defaults(recompute_ll_each_round=None)
     parser.add_argument("--cuda-empty-cache", action="store_true")
     parser.add_argument("--max-rounds", type=int, default=0)
-    parser.add_argument("--stall-rounds", type=int, default=1)
-    parser.add_argument("--improvement-window", type=int, default=5)
-    parser.add_argument("--eta", type=float, default=0.0)
+    parser.add_argument(
+        "--stall-rounds",
+        type=int,
+        default=None,
+        help="Stop after this many non-improving rounds. Omit to use the preset default.",
+    )
+    parser.add_argument(
+        "--improvement-window",
+        type=int,
+        default=None,
+        help="Relative improvement window. Omit to use the preset default.",
+    )
+    parser.add_argument(
+        "--eta",
+        type=float,
+        default=None,
+        help="Relative improvement threshold. Omit to use the preset default.",
+    )
     parser.add_argument(
         "--progress",
         dest="progress",
@@ -291,13 +323,16 @@ def main(argv: list[str] | None = None) -> int:
         run_fit(
             npz_path,
             labels_path,
-            optimizer_mode=str(args.optimizer_mode),
+            preset=str(args.preset),
+            optimizer_mode=(
+                None if args.optimizer_mode is None else str(args.optimizer_mode)
+            ),
             backend=str(args.backend),
             proposal_workers=None
             if args.proposal_workers is None
             else int(args.proposal_workers),
             seed=int(args.seed),
-            restarts=int(args.restarts),
+            restarts=None if args.restarts is None else int(args.restarts),
             n_proposals=int(args.n_proposals),
             max_scored_proposals=None
             if args.max_scored_proposals is None
@@ -322,9 +357,13 @@ def main(argv: list[str] | None = None) -> int:
             recompute_ll_each_round=args.recompute_ll_each_round,
             cuda_empty_cache=bool(args.cuda_empty_cache),
             max_rounds=int(args.max_rounds),
-            stall_rounds=int(args.stall_rounds),
-            improvement_window=int(args.improvement_window),
-            eta=float(args.eta),
+            stall_rounds=None if args.stall_rounds is None else int(args.stall_rounds),
+            improvement_window=(
+                None
+                if args.improvement_window is None
+                else int(args.improvement_window)
+            ),
+            eta=None if args.eta is None else float(args.eta),
             overwrite=bool(args.overwrite),
             progress=bool(args.progress),
             verbose=bool(args.verbose),

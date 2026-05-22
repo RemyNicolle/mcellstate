@@ -60,7 +60,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Parallel proposal-family worker count.",
     )
     parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--restarts", type=int, default=1)
+    parser.add_argument(
+        "--restarts",
+        type=int,
+        default=None,
+        help="Restart count. Omit to use the preset default; gpu preset currently defaults to multiple restarts.",
+    )
     parser.add_argument("--n-proposals", type=int, default=100_000)
     parser.add_argument("--max-scored-proposals", type=int, default=None)
     parser.add_argument(
@@ -87,9 +92,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(recompute_ll_each_round=None)
     parser.add_argument("--cuda-empty-cache", action="store_true")
     parser.add_argument("--max-rounds", type=int, default=0)
-    parser.add_argument("--stall-rounds", type=int, default=1)
-    parser.add_argument("--improvement-window", type=int, default=5)
-    parser.add_argument("--eta", type=float, default=0.0)
+    parser.add_argument(
+        "--stall-rounds",
+        type=int,
+        default=None,
+        help="Stop after this many non-improving rounds. Omit to use the preset default.",
+    )
+    parser.add_argument(
+        "--improvement-window",
+        type=int,
+        default=None,
+        help="Relative improvement window. Omit to use the preset default.",
+    )
+    parser.add_argument(
+        "--eta",
+        type=float,
+        default=None,
+        help="Relative improvement threshold. Omit to use the preset default.",
+    )
     parser.add_argument(
         "--progress",
         dest="progress",
@@ -191,8 +211,11 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     "--seed",
                     str(args.seed),
-                    "--restarts",
-                    str(args.restarts),
+                    *(
+                        []
+                        if args.restarts is None
+                        else ["--restarts", str(args.restarts)]
+                    ),
                     "--n-proposals",
                     str(args.n_proposals),
                     *(
@@ -244,12 +267,17 @@ def main(argv: list[str] | None = None) -> int:
                     *(["--cuda-empty-cache"] if args.cuda_empty_cache else []),
                     "--max-rounds",
                     str(args.max_rounds),
-                    "--stall-rounds",
-                    str(args.stall_rounds),
-                    "--improvement-window",
-                    str(args.improvement_window),
-                    "--eta",
-                    str(args.eta),
+                    *(
+                        []
+                        if args.stall_rounds is None
+                        else ["--stall-rounds", str(args.stall_rounds)]
+                    ),
+                    *(
+                        []
+                        if args.improvement_window is None
+                        else ["--improvement-window", str(args.improvement_window)]
+                    ),
+                    *([] if args.eta is None else ["--eta", str(args.eta)]),
                 ],
             )
         )
