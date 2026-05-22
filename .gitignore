@@ -1,3 +1,4 @@
 /.pytest_cache
 /.vendor_cellstates
 /vendor_src
+benchmarks/results/lastRun/
