@@ -104,7 +104,9 @@ class SparseCountVector:
                 self._sorted_indices = np.empty(0, dtype=np.int64)
                 self._sorted_values = np.empty(0, dtype=np.int64)
             else:
-                genes = np.fromiter(self.counts.keys(), dtype=np.int64, count=len(self.counts))
+                genes = np.fromiter(
+                    self.counts.keys(), dtype=np.int64, count=len(self.counts)
+                )
                 order = np.argsort(genes, kind="mergesort")
                 values = np.fromiter(
                     (self.counts[int(gene)] for gene in genes),
@@ -168,6 +170,44 @@ class SparseCountVector:
         return removed_genes
 
 
+def _random_online_labels(
+    n_cells: int,
+    *,
+    rng: np.random.Generator,
+    n_clusters: int,
+) -> np.ndarray:
+    n_cells = int(n_cells)
+    if n_cells <= 0:
+        return np.empty(0, dtype=np.int64)
+    n_clusters = max(1, min(n_cells, int(n_clusters)))
+    order = rng.permutation(n_cells).astype(np.int64, copy=False)
+    labels = np.full(n_cells, -1, dtype=np.int64)
+    sizes = np.zeros(n_clusters, dtype=np.int64)
+
+    seeded = min(n_clusters, n_cells)
+    for idx in range(seeded):
+        cell = int(order[idx])
+        labels[cell] = idx
+        sizes[idx] = 1
+    active = seeded
+
+    for idx in range(seeded, n_cells):
+        cell = int(order[idx])
+        open_new_cluster = active < n_clusters and (
+            active == 0 or rng.random() < (1.0 / float(idx + 1))
+        )
+        if open_new_cluster:
+            target = active
+            active += 1
+        else:
+            probs = sizes[:active].astype(np.float64) + 0.5
+            probs = probs / float(probs.sum())
+            target = int(rng.choice(active, p=probs))
+        labels[cell] = target
+        sizes[target] += 1
+    return labels
+
+
 class PartitionState:
     def __init__(
         self,
@@ -192,12 +232,18 @@ class PartitionState:
         self.active_cluster_ids = active_cluster_ids
         self.next_cluster_id = int(next_cluster_id)
         self.gene_to_clusters = gene_to_clusters
-        self.gene_cluster_counts = np.asarray(gene_cluster_counts, dtype=np.int64).copy()
-        self.cell_totals = np.asarray(self.X.sum(axis=1)).ravel().astype(np.int64, copy=False)
+        self.gene_cluster_counts = np.asarray(
+            gene_cluster_counts, dtype=np.int64
+        ).copy()
+        self.cell_totals = (
+            np.asarray(self.X.sum(axis=1)).ravel().astype(np.int64, copy=False)
+        )
         self.cell_nnz = np.diff(self.X.indptr).astype(np.int64, copy=False)
         self.version = int(version)
         self.last_touched_clusters = set(
-            active_cluster_ids if last_touched_clusters is None else (int(x) for x in last_touched_clusters),
+            active_cluster_ids
+            if last_touched_clusters is None
+            else (int(x) for x in last_touched_clusters),
         )
         self.last_touched_genes = (
             np.arange(self.n_genes, dtype=np.int64)
@@ -231,11 +277,22 @@ class PartitionState:
                 z = np.arange(X.shape[0], dtype=np.int64)
             elif init == "one_cluster":
                 z = np.zeros(X.shape[0], dtype=np.int64)
-            elif init == "random":
+            elif init in {"random", "random_online"}:
                 rng = np.random.default_rng(seed)
                 if n_clusters is None:
-                    n_clusters = max(1, min(X.shape[0], int(np.sqrt(max(X.shape[0], 1)))))
-                z = rng.integers(0, int(n_clusters), size=X.shape[0], dtype=np.int64)
+                    n_clusters = max(
+                        1, min(X.shape[0], int(np.sqrt(max(X.shape[0], 1))))
+                    )
+                if init == "random":
+                    z = rng.integers(
+                        0, int(n_clusters), size=X.shape[0], dtype=np.int64
+                    )
+                else:
+                    z = _random_online_labels(
+                        X.shape[0],
+                        rng=rng,
+                        n_clusters=int(n_clusters),
+                    )
             elif init == "leiden_overclustered":
                 from .warm_start import overclustered_leiden_labels
 
@@ -243,6 +300,25 @@ class PartitionState:
                     X,
                     seed=seed,
                     target_clusters=n_clusters,
+                )
+            elif init == "leiden_less_overclustered":
+                from .warm_start import overclustered_leiden_labels
+
+                relaxed_target = (
+                    max(
+                        2,
+                        min(
+                            X.shape[0],
+                            max(8, int(4.0 * np.sqrt(max(X.shape[0], 1)))),
+                        ),
+                    )
+                    if n_clusters is None
+                    else max(2, min(X.shape[0], int(n_clusters)))
+                )
+                z = overclustered_leiden_labels(
+                    X,
+                    seed=seed,
+                    target_clusters=relaxed_target,
                 )
             else:
                 raise ValueError(f"unknown init mode: {init}")
@@ -261,7 +337,9 @@ class PartitionState:
         z = inverse.astype(np.int64, copy=False)
 
         clusters: dict[int, SparseCountVector] = {}
-        cells_by_cluster: dict[int, CellMembership] = defaultdict(lambda: CellMembership([], {}))
+        cells_by_cluster: dict[int, CellMembership] = defaultdict(
+            lambda: CellMembership([], {})
+        )
         gene_to_clusters: dict[int, set[int]] = defaultdict(set)
         active_cluster_ids: set[int] = set()
         gene_cluster_counts = np.zeros(X.shape[1], dtype=np.int64)
@@ -296,7 +374,10 @@ class PartitionState:
         copied = PartitionState(
             X=self.X,
             z=self.z.copy(),
-            clusters={cluster_id: vector.copy() for cluster_id, vector in self.clusters.items()},
+            clusters={
+                cluster_id: vector.copy()
+                for cluster_id, vector in self.clusters.items()
+            },
             cells_by_cluster={
                 cluster_id: membership.copy()
                 for cluster_id, membership in self.cells_by_cluster.items()
@@ -304,7 +385,8 @@ class PartitionState:
             active_cluster_ids=set(self.active_cluster_ids),
             next_cluster_id=self.next_cluster_id,
             gene_to_clusters={
-                gene: set(cluster_ids) for gene, cluster_ids in self.gene_to_clusters.items()
+                gene: set(cluster_ids)
+                for gene, cluster_ids in self.gene_to_clusters.items()
             },
             gene_cluster_counts=self.gene_cluster_counts.copy(),
             version=self.version,
@@ -337,7 +419,11 @@ class PartitionState:
         return int(self.clusters[int(cluster_id)].total)
 
     def non_singleton_cluster_ids(self) -> list[int]:
-        return [cluster_id for cluster_id in self.active_cluster_ids if self.cluster_size(cluster_id) > 1]
+        return [
+            cluster_id
+            for cluster_id in self.active_cluster_ids
+            if self.cluster_size(cluster_id) > 1
+        ]
 
     def active_cluster_array(self) -> np.ndarray:
         return np.asarray(sorted(self.active_cluster_ids), dtype=np.int64)
@@ -360,7 +446,10 @@ class PartitionState:
         self._ensure_likelihood_cache_identity(psi)
         if self._cached_total_log_likelihood is None:
             self._cached_total_log_likelihood = float(
-                sum(self.cluster_log_likelihood_cached(cluster_id, psi) for cluster_id in self.active_cluster_ids),
+                sum(
+                    self.cluster_log_likelihood_cached(cluster_id, psi)
+                    for cluster_id in self.active_cluster_ids
+                ),
             )
         return float(self._cached_total_log_likelihood)
 
@@ -391,10 +480,16 @@ class PartitionState:
             self._likelihood_cache.pop(cluster_id, None)
         self._cached_total_log_likelihood = None
 
-    def _note_state_change(self, touched_clusters: Iterable[int], touched_genes: Iterable[int]) -> None:
+    def _note_state_change(
+        self, touched_clusters: Iterable[int], touched_genes: Iterable[int]
+    ) -> None:
         self.version += 1
-        self.last_touched_clusters = {int(cluster_id) for cluster_id in touched_clusters}
-        self.last_touched_genes = np.asarray(sorted({int(gene) for gene in touched_genes}), dtype=np.int64)
+        self.last_touched_clusters = {
+            int(cluster_id) for cluster_id in touched_clusters
+        }
+        self.last_touched_genes = np.asarray(
+            sorted({int(gene) for gene in touched_genes}), dtype=np.int64
+        )
 
     def _remove_cluster_gene_links(self, cluster_id: int, genes: Iterable[int]) -> None:
         cluster_id = int(cluster_id)
@@ -434,7 +529,10 @@ class PartitionState:
         cluster_b = int(cluster_b)
         if cluster_a == cluster_b:
             raise ValueError("cannot merge a cluster with itself")
-        if cluster_a not in self.active_cluster_ids or cluster_b not in self.active_cluster_ids:
+        if (
+            cluster_a not in self.active_cluster_ids
+            or cluster_b not in self.active_cluster_ids
+        ):
             raise KeyError("merge requested on an inactive cluster")
 
         vector_a = self.clusters[cluster_a]
@@ -490,7 +588,10 @@ class PartitionState:
             raise ValueError("source and target clusters must differ")
         if self.z[cell] != source_cluster:
             raise ValueError("cell does not belong to the requested source cluster")
-        if source_cluster not in self.active_cluster_ids or target_cluster not in self.active_cluster_ids:
+        if (
+            source_cluster not in self.active_cluster_ids
+            or target_cluster not in self.active_cluster_ids
+        ):
             raise KeyError("move requested on an inactive cluster")
 
         indices, values = self.cell_counts(cell)
@@ -528,7 +629,9 @@ class PartitionState:
             raise ValueError("cannot peel an entire cluster into a new cluster")
         for cell in selected:
             if self.z[cell] != source_cluster:
-                raise ValueError("a requested cell does not belong to the source cluster")
+                raise ValueError(
+                    "a requested cell does not belong to the source cluster"
+                )
 
         if block_indices is None or block_values is None:
             block_vector = self.block_vector_from_cells(selected)
@@ -569,11 +672,16 @@ class PartitionState:
             raise ValueError("source and target clusters must differ")
         if not selected:
             raise ValueError("cannot move an empty block")
-        if source_cluster not in self.active_cluster_ids or target_cluster not in self.active_cluster_ids:
+        if (
+            source_cluster not in self.active_cluster_ids
+            or target_cluster not in self.active_cluster_ids
+        ):
             raise KeyError("move requested on an inactive cluster")
         for cell in selected:
             if self.z[cell] != source_cluster:
-                raise ValueError("a requested cell does not belong to the source cluster")
+                raise ValueError(
+                    "a requested cell does not belong to the source cluster"
+                )
 
         if block_indices is None or block_values is None:
             block_vector = self.block_vector_from_cells(selected)
@@ -614,10 +722,14 @@ class PartitionState:
             if len(membership) == 0:
                 raise AssertionError(f"cluster {cluster_id} is empty")
             if len(membership.positions) != len(membership.cells):
-                raise AssertionError(f"cluster {cluster_id} membership positions are inconsistent")
+                raise AssertionError(
+                    f"cluster {cluster_id} membership positions are inconsistent"
+                )
             for idx, cell in enumerate(membership.cells):
                 if membership.positions[cell] != idx:
-                    raise AssertionError(f"cluster {cluster_id} membership indexing is inconsistent")
+                    raise AssertionError(
+                        f"cluster {cluster_id} membership indexing is inconsistent"
+                    )
                 reconstructed_z[cell] = cluster_id
                 if self.z[cell] != cluster_id:
                     raise AssertionError(f"z disagrees with membership for cell {cell}")

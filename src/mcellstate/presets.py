@@ -26,8 +26,9 @@ def resolve_fit_preset(name: str) -> dict[str, Any]:
         cpu_count = os.cpu_count() or 4
         default_workers = max(2, min(32, cpu_count))
         return {
-            "optimizer_mode": Optimizer.GPU_MODE,
+            "optimizer_mode": Optimizer.EFFECTIVE_MODE,
             "optimizer_kwargs": {
+                "search_policy": Optimizer.GPU_STRUCTURED_POLICY,
                 "recompute_ll_each_round": False,
                 "proposal_workers": default_workers,
             },
@@ -36,6 +37,7 @@ def resolve_fit_preset(name: str) -> dict[str, Any]:
         return {
             "optimizer_mode": Optimizer.EFFECTIVE_MODE,
             "optimizer_kwargs": {
+                "search_policy": Optimizer.CELLSTATES_LIKE_POLICY,
                 "greedy_merge_sweeps": 2,
                 "exact_cell_reassign_passes": 3,
                 "serial_refine_passes": 2,
@@ -46,6 +48,7 @@ def resolve_fit_preset(name: str) -> dict[str, Any]:
         return {
             "optimizer_mode": Optimizer.EFFECTIVE_MODE,
             "optimizer_kwargs": {
+                "search_policy": Optimizer.CELLSTATES_LIKE_POLICY,
                 "validate_batches": False,
                 "perturb_every": 3,
                 "perturb_steps": 16,

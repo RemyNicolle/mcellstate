@@ -39,6 +39,8 @@ def test_cli_fit_runs_end_to_end(tmp_path):
             "singletons",
             "--n-proposals",
             "64",
+            "--restarts",
+            "1",
             "--max-rounds",
             "4",
             "--seed",
@@ -55,6 +57,7 @@ def test_cli_fit_runs_end_to_end(tmp_path):
     assert summary["n_clusters"] >= 1
     assert summary["labels_path"] == str(output_path)
     assert summary["preset"] == "gpu"
+    assert summary["search_policy"] == "gpu_structured"
 
 
 def test_cli_fit_progress_mode_prints_timing(tmp_path, capsys):
@@ -84,6 +87,8 @@ def test_cli_fit_progress_mode_prints_timing(tmp_path, capsys):
             "singletons",
             "--n-proposals",
             "64",
+            "--restarts",
+            "1",
             "--max-rounds",
             "2",
             "--seed",
@@ -125,6 +130,8 @@ def test_cli_fit_verbose_mode_prints_steps(tmp_path, capsys):
             "singletons",
             "--n-proposals",
             "32",
+            "--restarts",
+            "1",
             "--max-rounds",
             "1",
             "--seed",
@@ -169,6 +176,8 @@ def test_cli_cpu_preset_forces_cpu_backend_and_records_proposal_workers(tmp_path
             "singletons",
             "--n-proposals",
             "32",
+            "--restarts",
+            "1",
             "--max-rounds",
             "1",
             "--seed",

@@ -130,6 +130,7 @@ def test_move_family_sampling_uses_uniform_fast_path():
         pi_move=1.0,
         pi_block_peel=0.0,
         pi_block_move=0.0,
+        move_uniform_prob=1.0,
         proposal_workers=1,
         seed=73,
     )
@@ -233,6 +234,7 @@ def test_block_move_family_sampling_uses_uniform_fast_path():
         pi_move=0.0,
         pi_block_peel=0.0,
         pi_block_move=1.0,
+        block_move_uniform_prob=1.0,
         proposal_workers=1,
         seed=74,
     )

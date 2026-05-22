@@ -94,8 +94,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional low-level override. Prefer --preset for normal usage.",
     )
     fit.add_argument(
+        "--search-policy",
+        choices=Optimizer.SEARCH_POLICIES,
+        default=None,
+        help="Search policy to use independently of backend. cuda defaults to gpu_structured unless legacy gpu optimizer-mode is requested.",
+    )
+    fit.add_argument(
         "--init",
-        choices=["singletons", "one_cluster", "random", "leiden_overclustered"],
+        choices=[
+            "singletons",
+            "one_cluster",
+            "random",
+            "random_online",
+            "leiden_overclustered",
+            "leiden_less_overclustered",
+        ],
         default="leiden_overclustered",
         help="Initial partition strategy.",
     )
@@ -127,7 +140,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     fit.add_argument("--seed", type=int, default=1, help="Random seed.")
     fit.add_argument(
-        "--restarts", type=int, default=1, help="Number of restarts to run."
+        "--restarts", type=int, default=None, help="Number of restarts to run."
     )
     fit.add_argument(
         "--n-proposals",
@@ -205,14 +218,17 @@ def build_parser() -> argparse.ArgumentParser:
     fit.add_argument(
         "--stall-rounds",
         type=int,
-        default=1,
+        default=None,
         help="Stop after this many non-improving rounds.",
     )
     fit.add_argument(
-        "--improvement-window", type=int, default=5, help="Relative improvement window."
+        "--improvement-window",
+        type=int,
+        default=None,
+        help="Relative improvement window.",
     )
     fit.add_argument(
-        "--eta", type=float, default=0.0, help="Relative improvement threshold."
+        "--eta", type=float, default=None, help="Relative improvement threshold."
     )
     fit.add_argument(
         "--target-clusters",
@@ -222,6 +238,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     fit.add_argument(
         "--validate-batches", action="store_true", help="Validate batch gains exactly."
+    )
+    fit.add_argument(
+        "--oracle-reference-labels",
+        type=Path,
+        default=None,
+        help="Optional reference labels for over-splitting diagnostics only.",
     )
     fit.add_argument(
         "--update-psi",
@@ -293,11 +315,25 @@ def run_fit(args: argparse.Namespace) -> dict:
 
     preset = resolve_fit_preset(args.preset)
     optimizer_mode = str(args.optimizer_mode or preset["optimizer_mode"])
+    preset_search_policy = preset["optimizer_kwargs"].get("search_policy")
     effective_backend = str(args.backend)
     if effective_backend == "auto":
         if optimizer_mode == Optimizer.CPU_ONLY_MODE:
             effective_backend = "torch-cpu"
-        elif optimizer_mode == Optimizer.GPU_MODE or args.preset == "gpu":
+        elif (
+            optimizer_mode == Optimizer.GPU_MODE
+            or args.preset == "gpu"
+            or args.search_policy
+            in {
+                Optimizer.GPU_STRUCTURED_POLICY,
+                Optimizer.GPU_FAST_WEAK_POLICY,
+            }
+            or preset_search_policy
+            in {
+                Optimizer.GPU_STRUCTURED_POLICY,
+                Optimizer.GPU_FAST_WEAK_POLICY,
+            }
+        ):
             effective_backend = "cuda"
         else:
             effective_backend = "cpu"
@@ -309,6 +345,19 @@ def run_fit(args: argparse.Namespace) -> dict:
         "torch",
     }:
         effective_backend = "torch-cpu"
+    effective_search_policy = str(
+        args.search_policy
+        or preset_search_policy
+        or (
+            Optimizer.GPU_FAST_WEAK_POLICY
+            if optimizer_mode == Optimizer.GPU_MODE
+            else (
+                Optimizer.GPU_STRUCTURED_POLICY
+                if effective_backend == "cuda"
+                else Optimizer.CELLSTATES_LIKE_POLICY
+            )
+        )
+    )
     target_clusters = (
         int(args.target_clusters)
         if args.target_clusters is not None
@@ -329,6 +378,7 @@ def run_fit(args: argparse.Namespace) -> dict:
                     f"backend={effective_backend}",
                     f"preset={args.preset}",
                     f"optimizer_mode={optimizer_mode}",
+                    f"search_policy={effective_search_policy}",
                     f"n_cells={n_cells}",
                     f"n_genes={int(X.shape[1])}",
                     f"n_proposals={int(args.n_proposals)}",
@@ -342,10 +392,16 @@ def run_fit(args: argparse.Namespace) -> dict:
             flush=True,
         )
     optimizer_kwargs = dict(preset["optimizer_kwargs"])
+    oracle_reference_labels = (
+        None
+        if args.oracle_reference_labels is None
+        else _load_labels(args.oracle_reference_labels)
+    )
     base_kwargs = {
         "state": state,
         "psi": psi,
         "optimizer_mode": optimizer_mode,
+        "search_policy": effective_search_policy,
         "backend": effective_backend,
         "backend_threads": args.threads,
         "n_proposals": args.n_proposals,
@@ -360,6 +416,7 @@ def run_fit(args: argparse.Namespace) -> dict:
             min(n_cells, leiden_target * 2),
             max(16, leiden_target // 2),
         ),
+        "oracle_reference_labels": oracle_reference_labels,
     }
     for key in [
         "proposal_workers",
@@ -378,14 +435,55 @@ def run_fit(args: argparse.Namespace) -> dict:
     optimizer = Optimizer(**optimizer_kwargs)
 
     fit_max_rounds = None if int(args.max_rounds) <= 0 else int(args.max_rounds)
+    fit_restarts = (
+        8
+        if args.restarts is None
+        and effective_search_policy == Optimizer.GPU_STRUCTURED_POLICY
+        else 1
+        if args.restarts is None
+        else int(args.restarts)
+    )
+    fit_stall_rounds = (
+        25
+        if args.stall_rounds is None
+        and effective_search_policy == Optimizer.GPU_STRUCTURED_POLICY
+        else 1
+        if args.stall_rounds is None
+        else int(args.stall_rounds)
+    )
+    fit_improvement_window = (
+        20
+        if args.improvement_window is None
+        and effective_search_policy == Optimizer.GPU_STRUCTURED_POLICY
+        else 5
+        if args.improvement_window is None
+        else int(args.improvement_window)
+    )
+    fit_eta = (
+        1e-10
+        if args.eta is None
+        and effective_search_policy == Optimizer.GPU_STRUCTURED_POLICY
+        else 0.0
+        if args.eta is None
+        else float(args.eta)
+    )
+    restart_inits = None
+    if effective_search_policy == Optimizer.GPU_STRUCTURED_POLICY and fit_restarts > 1:
+        restart_inits = [
+            "leiden_overclustered",
+            "leiden_less_overclustered",
+            "random_online",
+            "perturbed_best",
+        ]
     start = time.perf_counter()
     result = optimizer.fit(
         max_rounds=fit_max_rounds,
         update_psi=bool(args.update_psi),
-        restarts=int(args.restarts),
-        stall_rounds=int(args.stall_rounds),
-        improvement_window=int(args.improvement_window),
-        eta=float(args.eta),
+        restarts=int(fit_restarts),
+        stall_rounds=int(fit_stall_rounds),
+        improvement_window=int(fit_improvement_window),
+        eta=float(fit_eta),
+        restart_inits=restart_inits,
         progress=bool(args.progress),
         verbose=bool(args.verbose),
     )
@@ -408,14 +506,18 @@ def run_fit(args: argparse.Namespace) -> dict:
         "log_likelihood": float(result.log_likelihood),
         "preset": str(args.preset),
         "optimizer_mode": optimizer_mode,
+        "search_policy": effective_search_policy,
         "backend": str(effective_backend),
         "threads": None if args.threads is None else int(args.threads),
         "proposal_workers": None
         if args.proposal_workers is None
         else int(args.proposal_workers),
         "seed": int(args.seed),
-        "restarts": int(args.restarts),
+        "restarts": int(fit_restarts),
         "max_rounds": fit_max_rounds,
+        "stall_rounds": int(fit_stall_rounds),
+        "improvement_window": int(fit_improvement_window),
+        "eta": float(fit_eta),
         "tau": float(tau),
         "init": str(args.init),
         "n_proposals": int(args.n_proposals),

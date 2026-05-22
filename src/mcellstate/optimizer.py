@@ -38,6 +38,14 @@ class Optimizer:
     GPU_MODE = "gpu"
     CPU_ONLY_MODE = "cpu-only"
     OPTIMIZER_MODES = (EFFECTIVE_MODE, GPU_MODE, CPU_ONLY_MODE)
+    CELLSTATES_LIKE_POLICY = "cellstates_like"
+    GPU_STRUCTURED_POLICY = "gpu_structured"
+    GPU_FAST_WEAK_POLICY = "gpu_fast_weak"
+    SEARCH_POLICIES = (
+        CELLSTATES_LIKE_POLICY,
+        GPU_STRUCTURED_POLICY,
+        GPU_FAST_WEAK_POLICY,
+    )
 
     def __init__(
         self,
@@ -45,6 +53,7 @@ class Optimizer:
         state: PartitionState,
         psi: np.ndarray,
         optimizer_mode: str = EFFECTIVE_MODE,
+        search_policy: str | None = None,
         backend: str = "cpu",
         n_proposals: int = 100_000,
         seed: int | None = None,
@@ -101,6 +110,22 @@ class Optimizer:
         cuda_chunk_size: int | None = None,
         recompute_ll_each_round: bool | None = None,
         cuda_empty_cache: bool = False,
+        merge_closure_enabled: bool | None = None,
+        merge_closure_max_batches: int = 8,
+        merge_closure_stall_batches: int = 2,
+        merge_closure_pairs_per_batch: int = 8192,
+        merge_closure_epsilon_uniform: float = 0.05,
+        merge_closure_candidate_mode: str = "idf_shared_gene",
+        merge_closure_min_delta: float = 0.0,
+        multi_greedy_trials: int = 4,
+        batched_reassign_passes: int = 1,
+        batched_reassign_cells: int = 512,
+        batched_reassign_guided_targets: int = 8,
+        batched_reassign_uniform_targets: int = 2,
+        exhaustive_reassign_active_limit: int = 64,
+        block_grouping_enabled: bool = True,
+        block_grouping_min_cells: int = 2,
+        oracle_reference_labels: np.ndarray | None = None,
     ) -> None:
         optimizer_mode = str(optimizer_mode).lower()
         if optimizer_mode not in self.OPTIMIZER_MODES:
@@ -110,7 +135,12 @@ class Optimizer:
         self.initial_state = state.copy()
         self.psi = np.asarray(psi, dtype=np.float64)
         self.optimizer_mode = optimizer_mode
-        self.backend_name = backend
+        self.backend_name = str(backend)
+        self.search_policy = self._resolve_search_policy(
+            search_policy=search_policy,
+            optimizer_mode=optimizer_mode,
+            backend=self.backend_name,
+        )
         self.backend_threads = backend_threads
         self.n_proposals = int(n_proposals)
         self.proposal_workers = (
@@ -177,7 +207,37 @@ class Optimizer:
             None if recompute_ll_each_round is None else bool(recompute_ll_each_round)
         )
         self.cuda_empty_cache = bool(cuda_empty_cache)
-        self._apply_optimizer_mode_defaults()
+        self.merge_closure_enabled = (
+            None if merge_closure_enabled is None else bool(merge_closure_enabled)
+        )
+        self.merge_closure_max_batches = max(0, int(merge_closure_max_batches))
+        self.merge_closure_stall_batches = max(1, int(merge_closure_stall_batches))
+        self.merge_closure_pairs_per_batch = max(1, int(merge_closure_pairs_per_batch))
+        self.merge_closure_epsilon_uniform = max(
+            0.0, min(1.0, float(merge_closure_epsilon_uniform))
+        )
+        self.merge_closure_candidate_mode = str(merge_closure_candidate_mode)
+        self.merge_closure_min_delta = float(merge_closure_min_delta)
+        self.multi_greedy_trials = max(1, int(multi_greedy_trials))
+        self.batched_reassign_passes = max(0, int(batched_reassign_passes))
+        self.batched_reassign_cells = max(1, int(batched_reassign_cells))
+        self.batched_reassign_guided_targets = max(
+            0, int(batched_reassign_guided_targets)
+        )
+        self.batched_reassign_uniform_targets = max(
+            0, int(batched_reassign_uniform_targets)
+        )
+        self.exhaustive_reassign_active_limit = max(
+            2, int(exhaustive_reassign_active_limit)
+        )
+        self.block_grouping_enabled = bool(block_grouping_enabled)
+        self.block_grouping_min_cells = max(2, int(block_grouping_min_cells))
+        self.oracle_reference_labels = (
+            None
+            if oracle_reference_labels is None
+            else np.asarray(oracle_reference_labels, dtype=np.int64)
+        )
+        self._apply_search_policy_defaults()
         self.rng = np.random.default_rng(seed)
         self.base_family_weights = {
             "merge": float(pi_merge),
@@ -212,27 +272,51 @@ class Optimizer:
         )
         self.sampler.set_scoring_context(self.psi)
 
-    def _apply_optimizer_mode_defaults(self) -> None:
-        if self.optimizer_mode == self.EFFECTIVE_MODE:
-            if self.proposal_workers is None:
-                self.proposal_workers = 1
-            if self.random_proposals is None:
-                self.random_proposals = False
-            if self.random_accept_prob is None:
-                self.random_accept_prob = 0.0
-            if self.random_accept_max_fraction is None:
-                self.random_accept_max_fraction = 0.0
-            if self.proposal_batch_size is None:
-                self.proposal_batch_size = min(
-                    int(self.n_proposals),
-                    max(4096, min(16_384, int(max(self.n_proposals // 8, 4096)))),
+    def _resolve_search_policy(
+        self,
+        *,
+        search_policy: str | None,
+        optimizer_mode: str,
+        backend: str,
+    ) -> str:
+        if search_policy is not None:
+            resolved = str(search_policy).lower()
+            if resolved not in self.SEARCH_POLICIES:
+                raise ValueError(
+                    f"unknown search_policy {resolved!r}; expected one of {self.SEARCH_POLICIES}",
                 )
-            if self.recompute_ll_each_round is None:
-                self.recompute_ll_each_round = True
-            if self.cuda_chunk_size is None:
-                self.cuda_chunk_size = 8192
-            return
-        if self.optimizer_mode == self.GPU_MODE:
+            return resolved
+        if optimizer_mode == self.GPU_MODE:
+            return self.GPU_FAST_WEAK_POLICY
+        backend_name = str(backend).lower()
+        if backend_name == "cuda":
+            return self.GPU_STRUCTURED_POLICY
+        return self.CELLSTATES_LIKE_POLICY
+
+    def _apply_shared_defaults(self) -> None:
+        if self.proposal_workers is None:
+            self.proposal_workers = 1
+        if self.random_proposals is None:
+            self.random_proposals = False
+        if self.random_accept_prob is None:
+            self.random_accept_prob = 0.0
+        if self.random_accept_max_fraction is None:
+            self.random_accept_max_fraction = 0.0
+        if self.proposal_batch_size is None:
+            self.proposal_batch_size = min(
+                int(self.n_proposals),
+                max(4096, min(16_384, int(max(self.n_proposals // 8, 4096)))),
+            )
+        if self.recompute_ll_each_round is None:
+            self.recompute_ll_each_round = True
+        if self.cuda_chunk_size is None:
+            self.cuda_chunk_size = 8192
+        if self.merge_closure_enabled is None:
+            self.merge_closure_enabled = False
+
+    def _apply_search_policy_defaults(self) -> None:
+        self._apply_shared_defaults()
+        if self.search_policy == self.GPU_FAST_WEAK_POLICY:
             self.full_merge_stage = False
             self.greedy_merge_sweeps = 0
             self.exact_cell_reassign_passes = 0
@@ -240,57 +324,71 @@ class Optimizer:
             self.perturb_every = 0
             self.perturb_steps = 0
             self.serial_refine_passes = 0
-            if self.proposal_workers is None:
+            if self.proposal_workers is None or self.proposal_workers <= 1:
                 self.proposal_workers = max(2, min(32, os.cpu_count() or 2))
             if self.backend_threads is None:
                 self.backend_threads = max(4, min(32, os.cpu_count() or 4))
-            if self.random_proposals is None:
-                self.random_proposals = True
+            self.random_proposals = True
             if self.max_scored_proposals is None:
                 self.max_scored_proposals = int(self.n_proposals)
-            if self.random_accept_prob is None:
+            if self.random_accept_prob is None or self.random_accept_prob == 0.0:
                 self.random_accept_prob = 0.002
-            if self.random_accept_max_fraction is None:
+            if (
+                self.random_accept_max_fraction is None
+                or self.random_accept_max_fraction == 0.0
+            ):
                 self.random_accept_max_fraction = 0.002
-            if self.proposal_batch_size is None:
+            if self.proposal_batch_size is None or self.proposal_batch_size < 8192:
                 self.proposal_batch_size = min(
                     int(self.n_proposals),
                     max(8192, min(32_768, int(max(self.n_proposals // 4, 8192)))),
                 )
-            if self.recompute_ll_each_round is None:
-                self.recompute_ll_each_round = False
+            self.recompute_ll_each_round = False
+            self.merge_closure_enabled = False
             return
-        if self.optimizer_mode == self.CPU_ONLY_MODE:
-            if self.proposal_workers is None:
-                self.proposal_workers = max(2, min(8, os.cpu_count() or 2))
+
+        if self.search_policy == self.GPU_STRUCTURED_POLICY:
+            if self.proposal_workers is None or self.proposal_workers <= 1:
+                self.proposal_workers = max(2, min(32, os.cpu_count() or 2))
             if self.backend_threads is None:
-                self.backend_threads = max(2, min(8, os.cpu_count() or 2))
-            if self.random_proposals is None:
-                self.random_proposals = False
-            if self.random_accept_prob is None:
-                self.random_accept_prob = 0.0
-            if self.random_accept_max_fraction is None:
-                self.random_accept_max_fraction = 0.0
-            if self.proposal_batch_size is None:
+                self.backend_threads = max(4, min(32, os.cpu_count() or 4))
+            self.random_proposals = False
+            if self.max_scored_proposals is None:
+                self.max_scored_proposals = int(self.n_proposals)
+            if self.proposal_batch_size is None or self.proposal_batch_size < 8192:
                 self.proposal_batch_size = min(
                     int(self.n_proposals),
-                    max(4096, min(16_384, int(max(self.n_proposals // 8, 4096)))),
+                    max(8192, min(32_768, int(max(self.n_proposals // 4, 8192)))),
                 )
-            if self.recompute_ll_each_round is None:
-                self.recompute_ll_each_round = True
-            if self.cuda_chunk_size is None:
-                self.cuda_chunk_size = 8192
+            self.recompute_ll_each_round = False
+            if (
+                self.merge_closure_enabled is None
+                or self.merge_closure_enabled is False
+            ):
+                self.merge_closure_enabled = True
+            self.full_merge_stage = False
+            self.greedy_merge_sweeps = max(1, int(self.greedy_merge_sweeps))
+            self.exact_cell_reassign_passes = max(
+                1, int(self.exact_cell_reassign_passes)
+            )
+            self.cluster_reassign_sweeps = max(1, int(self.cluster_reassign_sweeps))
+            self.serial_refine_passes = max(1, int(self.serial_refine_passes))
             return
+
+        if self.optimizer_mode == self.CPU_ONLY_MODE and self.backend_threads is None:
+            self.backend_threads = max(2, min(8, os.cpu_count() or 2))
+        if self.optimizer_mode == self.CPU_ONLY_MODE and self.proposal_workers == 1:
+            self.proposal_workers = max(2, min(8, os.cpu_count() or 2))
 
     def fit(
         self,
         *,
         max_rounds: int | None = 1000,
         update_psi: bool = False,
-        restarts: int = 1,
-        stall_rounds: int = 10,
-        improvement_window: int = 5,
-        eta: float = 1e-8,
+        restarts: int | None = None,
+        stall_rounds: int | None = None,
+        improvement_window: int | None = None,
+        eta: float | None = None,
         restart_inits: list[str] | None = None,
         progress: bool = False,
         verbose: bool = False,
@@ -298,12 +396,48 @@ class Optimizer:
         verbose_stream: TextIO | None = None,
     ) -> FitResult:
         best_result: FitResult | None = None
+        best_restart_state: PartitionState | None = None
         histories: list[dict] = []
         progress_stream = progress_stream or None
         verbose_stream = verbose_stream or None
+        fit_restarts = (
+            (
+                8
+                if restarts is None and self.search_policy == self.GPU_STRUCTURED_POLICY
+                else 1
+            )
+            if restarts is None
+            else max(1, int(restarts))
+        )
+        fit_stall_rounds = (
+            25
+            if stall_rounds is None and self.search_policy == self.GPU_STRUCTURED_POLICY
+            else 10
+            if stall_rounds is None
+            else max(1, int(stall_rounds))
+        )
+        fit_improvement_window = (
+            20
+            if improvement_window is None
+            and self.search_policy == self.GPU_STRUCTURED_POLICY
+            else 5
+            if improvement_window is None
+            else max(1, int(improvement_window))
+        )
+        fit_eta = (
+            1e-10
+            if eta is None and self.search_policy == self.GPU_STRUCTURED_POLICY
+            else 1e-8
+            if eta is None
+            else float(eta)
+        )
 
-        for restart in range(int(restarts)):
-            state = self._make_restart_state(restart, restart_inits=restart_inits)
+        for restart in range(int(fit_restarts)):
+            state = self._make_restart_state(
+                restart,
+                restart_inits=restart_inits,
+                best_restart_state=best_restart_state,
+            )
             psi = self.psi.copy()
             state.initialize_likelihood_cache(psi)
             self.sampler.notify_state_changed(state, set(state.active_cluster_ids))
@@ -326,6 +460,9 @@ class Optimizer:
             history: list[dict] = []
             current_ll = state.total_log_likelihood_cached(psi)
             stall = 0
+            merge_closure_stall = 0
+            reassign_stall = 0
+            stop_reason = "completed"
             round_idx = 0
             round_limit = None if max_rounds is None else int(max_rounds)
 
@@ -362,6 +499,27 @@ class Optimizer:
                         restart=restart,
                         round_idx=round_idx,
                         stage=stage,
+                        message="merge closure phase",
+                    )
+                merge_closure = self._merge_closure_phase(
+                    state, backend, stage=stage, reason="round"
+                )
+                timing["merge_closure_s"] = time.perf_counter() - timer
+                if merge_closure["delta"] != 0.0:
+                    current_ll = self._advance_log_likelihood(
+                        current_ll,
+                        float(merge_closure["delta"]),
+                        state,
+                        psi,
+                    )
+
+                timer = time.perf_counter()
+                if verbose:
+                    self._emit_verbose(
+                        stream=verbose_stream,
+                        restart=restart,
+                        round_idx=round_idx,
+                        stage=stage,
                         message="full merge phase",
                     )
                 full_merge = self._full_merge_phase(state, backend, stage=stage)
@@ -381,11 +539,18 @@ class Optimizer:
                         restart=restart,
                         round_idx=round_idx,
                         stage=stage,
-                        message="exact cell reassignment phase",
+                        message="exact reassignment phase",
                     )
-                exact_cell_reassign = self._exact_cell_reassignment_sweep(
-                    state, backend, stage=stage
-                )
+                if self.search_policy == self.GPU_STRUCTURED_POLICY:
+                    exact_cell_reassign = self._batched_reassignment_cleanup(
+                        state,
+                        backend,
+                        stage=stage,
+                    )
+                else:
+                    exact_cell_reassign = self._exact_cell_reassignment_sweep(
+                        state, backend, stage=stage
+                    )
                 timing["exact_cell_reassign_s"] = time.perf_counter() - timer
                 if exact_cell_reassign["delta"] != 0.0:
                     current_ll = self._advance_log_likelihood(
@@ -430,6 +595,16 @@ class Optimizer:
                     scoring_s,
                     proposal_chunks,
                 ) = self._sample_and_score_proposals(state, backend)
+                (
+                    proposals,
+                    scores,
+                    move_grouping_stats,
+                ) = self._augment_with_grouped_block_moves(
+                    state,
+                    backend,
+                    proposals,
+                    scores,
+                )
                 timing["proposal_s"] = proposal_s
                 timing["scoring_s"] = scoring_s
                 if verbose:
@@ -461,6 +636,11 @@ class Optimizer:
                 accepted = self._select_positive_nonconflicting(
                     proposals, scores, backend=backend
                 )
+                family_diagnostics = self._family_diagnostics(
+                    proposals,
+                    scores,
+                    accepted,
+                )
                 timing["conflict_s"] = time.perf_counter() - timer
                 accepted_delta = float(sum(item["delta"] for item in accepted))
                 random_walk_accepted = int(
@@ -489,9 +669,12 @@ class Optimizer:
                     "n_positive": int(np.sum(scores > 0.0)),
                     "n_accepted": len(accepted),
                     "n_random_walk": random_walk_accepted,
+                    "merge_closure": merge_closure,
                     "full_merge": full_merge,
                     "exact_cell_reassign": exact_cell_reassign,
                     "greedy_merge": greedy_merge,
+                    "family_diagnostics": family_diagnostics,
+                    "move_grouping": move_grouping_stats,
                     "accepted_delta": accepted_delta,
                     "log_likelihood_before": round_before_ll,
                     "touch_sets": [sorted(item["touch_set"]) for item in accepted],
@@ -500,6 +683,11 @@ class Optimizer:
                         for item in accepted
                     ],
                 }
+                if self.oracle_reference_labels is not None:
+                    round_record["oracle_reference"] = self._oracle_reference_report(
+                        state,
+                        backend,
+                    )
 
                 timer = time.perf_counter()
                 touched_clusters: set[int] = set()
@@ -586,7 +774,8 @@ class Optimizer:
                     )
 
                 total_delta = (
-                    float(full_merge["delta"])
+                    float(merge_closure["delta"])
+                    + float(full_merge["delta"])
                     + float(exact_cell_reassign["delta"])
                     + float(greedy_merge["delta"])
                     + accepted_delta
@@ -645,6 +834,7 @@ class Optimizer:
                 round_record["tau_update"] = tau_update
                 round_record["log_likelihood_after"] = current_ll
                 round_record["timing_s"] = timing
+                round_record["search_policy"] = self.search_policy
                 history.append(round_record)
                 if progress:
                     self._emit_progress(
@@ -664,7 +854,8 @@ class Optimizer:
                     )
 
                 n_positive_steps = (
-                    int(full_merge["n_steps"])
+                    int(merge_closure["n_steps"])
+                    + int(full_merge["n_steps"])
                     + int(exact_cell_reassign["n_steps"])
                     + int(greedy_merge["n_steps"])
                     + accepted_positive_steps
@@ -673,16 +864,69 @@ class Optimizer:
                     + int(cluster_reassign["n_steps"])
                     + int(perturbation.get("positive_cleanup_steps", 0))
                 )
+                merge_closure_stall = (
+                    merge_closure_stall + 1 if int(merge_closure["n_steps"]) == 0 else 0
+                )
+                reassign_stall = (
+                    reassign_stall + 1
+                    if int(exact_cell_reassign["n_steps"]) == 0
+                    else 0
+                )
                 stall = stall + 1 if n_positive_steps == 0 else 0
-                if stall >= stall_rounds:
+                if (
+                    stall >= fit_stall_rounds
+                    and merge_closure_stall >= self.merge_closure_stall_batches
+                    and reassign_stall >= 1
+                ):
+                    stop_reason = "stall"
+                    round_record["stop_reason"] = stop_reason
                     break
 
-                if self._relative_improvement_below_threshold(
-                    history, improvement_window, eta
+                if (
+                    self._relative_improvement_below_threshold(
+                        history, fit_improvement_window, fit_eta
+                    )
+                    and merge_closure_stall >= self.merge_closure_stall_batches
+                    and reassign_stall >= 1
                 ):
+                    stop_reason = "improvement_window"
+                    round_record["stop_reason"] = stop_reason
                     break
                 round_idx += 1
 
+            if history and "stop_reason" not in history[-1]:
+                history[-1]["stop_reason"] = stop_reason
+            if self.search_policy == self.GPU_STRUCTURED_POLICY:
+                final_merge_closure = self._merge_closure_phase(
+                    state,
+                    backend,
+                    stage=self._stage_name(state),
+                    reason="final_cleanup",
+                )
+                if final_merge_closure["delta"] != 0.0:
+                    current_ll = self._advance_log_likelihood(
+                        current_ll,
+                        float(final_merge_closure["delta"]),
+                        state,
+                        psi,
+                    )
+                final_reassign = self._batched_reassignment_cleanup(
+                    state,
+                    backend,
+                    stage=self._stage_name(state),
+                )
+                if final_reassign["delta"] != 0.0:
+                    current_ll = self._advance_log_likelihood(
+                        current_ll,
+                        float(final_reassign["delta"]),
+                        state,
+                        psi,
+                    )
+                if history:
+                    history[-1]["final_cleanup"] = {
+                        "merge_closure": final_merge_closure,
+                        "reassignment": final_reassign,
+                    }
             exact_final_ll = full_partition_log_likelihood(state, psi)
             if history:
                 history[-1]["log_likelihood_after"] = exact_final_ll
@@ -707,6 +951,7 @@ class Optimizer:
                 or result.log_likelihood > best_result.log_likelihood
             ):
                 best_result = result
+                best_restart_state = result.state.copy()
 
         if best_result is None:  # pragma: no cover - defensive branch
             raise RuntimeError("optimizer did not run any restarts")
@@ -748,6 +993,7 @@ class Optimizer:
         ]
         for key in (
             "configure_s",
+            "merge_closure_s",
             "full_merge_s",
             "exact_cell_reassign_s",
             "greedy_merge_s",
@@ -871,7 +1117,7 @@ class Optimizer:
         count = int(count)
         if count <= 0:
             return []
-        if self.optimizer_mode == self.GPU_MODE and self.random_proposals:
+        if self.search_policy == self.GPU_FAST_WEAK_POLICY and self.random_proposals:
             backend_sampler = getattr(backend, "sample_random_proposals", None)
             if backend_sampler is not None:
                 return backend_sampler(
@@ -974,13 +1220,24 @@ class Optimizer:
         restart: int,
         *,
         restart_inits: list[str] | None,
+        best_restart_state: PartitionState | None,
     ) -> PartitionState:
         if restart == 0:
             return self.initial_state.copy()
         if restart_inits is None or not restart_inits:
-            init = ("leiden_overclustered", "random", "singletons")[(restart - 1) % 3]
+            init = ("leiden_overclustered", "random_online", "singletons")[
+                (restart - 1) % 3
+            ]
         else:
             init = restart_inits[(restart - 1) % len(restart_inits)]
+        if isinstance(init, str) and init == "perturbed_best":
+            if best_restart_state is None:
+                init = "leiden_overclustered"
+            else:
+                return self._perturb_restart_state(
+                    best_restart_state,
+                    seed=None if self.seed is None else self.seed + restart,
+                )
         n_clusters = self._restart_target_clusters(restart)
         return PartitionState.from_csr(
             self.initial_state.X,
@@ -988,6 +1245,37 @@ class Optimizer:
             seed=None if self.seed is None else self.seed + restart,
             n_clusters=n_clusters,
         )
+
+    def _perturb_restart_state(
+        self,
+        state: PartitionState,
+        *,
+        seed: int | None,
+    ) -> PartitionState:
+        rng = np.random.default_rng(seed)
+        z = state.z.copy()
+        n_cells = int(z.size)
+        if n_cells <= 1:
+            return PartitionState.from_assignment(state.X, z)
+        active_labels = np.unique(z)
+        if active_labels.size <= 1:
+            return PartitionState.from_assignment(state.X, z)
+        n_perturb = min(
+            n_cells - 1,
+            max(1, min(64, int(np.ceil(0.05 * float(n_cells))))),
+        )
+        selected = rng.choice(n_cells, size=n_perturb, replace=False)
+        next_label = int(active_labels.max()) + 1
+        for cell in np.asarray(selected, dtype=np.int64).tolist():
+            current = int(z[int(cell)])
+            if rng.random() < 0.75:
+                candidates = active_labels[active_labels != current]
+                if candidates.size:
+                    z[int(cell)] = int(rng.choice(candidates))
+                    continue
+            z[int(cell)] = next_label
+            next_label += 1
+        return PartitionState.from_assignment(state.X, z)
 
     def _restart_target_clusters(self, restart: int) -> int | None:
         if self.leiden_restart_targets:
@@ -1005,8 +1293,11 @@ class Optimizer:
         return max(1, min(self.initial_state.n_cells, target))
 
     def _configure_stage(self, state: PartitionState, stage: str) -> None:
-        if self.optimizer_mode == self.GPU_MODE:
-            self.sampler.set_family_weights(**self._gpu_stage_weights(stage))
+        if self.search_policy == self.GPU_FAST_WEAK_POLICY:
+            self.sampler.set_family_weights(**self._gpu_fast_weak_stage_weights(stage))
+            return
+        if self.search_policy == self.GPU_STRUCTURED_POLICY:
+            self.sampler.set_family_weights(**self._gpu_structured_stage_weights(stage))
             return
         if self.optimizer_mode == self.CPU_ONLY_MODE:
             self.sampler.set_family_weights(
@@ -1023,7 +1314,7 @@ class Optimizer:
         del state
         self.sampler.set_family_weights(**self._stage_weights(stage))
 
-    def _gpu_stage_weights(self, stage: str) -> dict[str, float]:
+    def _gpu_fast_weak_stage_weights(self, stage: str) -> dict[str, float]:
         if stage == "coarsen":
             return {
                 "merge": 0.75,
@@ -1046,6 +1337,31 @@ class Optimizer:
             "move": 0.55,
             "block_peel": 0.0,
             "block_move": 0.0,
+        }
+
+    def _gpu_structured_stage_weights(self, stage: str) -> dict[str, float]:
+        if stage == "coarsen":
+            return {
+                "merge": 0.85,
+                "move": 0.10,
+                "peel": 0.0,
+                "block_move": 0.05,
+                "block_peel": 0.0,
+            }
+        if stage == "balanced":
+            return {
+                "merge": 0.45,
+                "move": 0.30,
+                "block_move": 0.20,
+                "peel": 0.05,
+                "block_peel": 0.0,
+            }
+        return {
+            "merge": 0.20,
+            "move": 0.40,
+            "block_move": 0.25,
+            "peel": 0.10,
+            "block_peel": 0.05,
         }
 
     def _stage_name(self, state: PartitionState) -> str:
@@ -1159,22 +1475,400 @@ class Optimizer:
     def _select_positive_nonconflicting_candidates(
         self, candidates: list[dict], *, backend=None
     ) -> list[dict]:
-        if backend is not None:
+        if backend is not None and self.multi_greedy_trials <= 1:
             backend_selector = getattr(
                 backend, "select_nonconflicting_candidates", None
             )
             if backend_selector is not None:
                 return backend_selector(candidates)
-        candidates.sort(key=lambda item: item["delta"], reverse=True)
+        if not candidates:
+            return []
+        ordered = sorted(
+            candidates, key=lambda item: float(item["delta"]), reverse=True
+        )
+        best = self._greedy_accept_candidates(ordered)
+        best_delta = float(sum(float(item["delta"]) for item in best))
+        if self.multi_greedy_trials <= 1 or len(ordered) <= 1:
+            return best
+        delta_scale = max(
+            1e-12,
+            max(abs(float(item["delta"])) for item in ordered) * 1e-9,
+        )
+        for _ in range(self.multi_greedy_trials - 1):
+            trial_order = self._shuffle_near_equal_candidates(
+                ordered, delta_tolerance=delta_scale
+            )
+            accepted = self._greedy_accept_candidates(trial_order)
+            accepted_delta = float(sum(float(item["delta"]) for item in accepted))
+            if accepted_delta > best_delta:
+                best = accepted
+                best_delta = accepted_delta
+        return best
 
+    def _shuffle_near_equal_candidates(
+        self,
+        ordered: list[dict],
+        *,
+        delta_tolerance: float,
+    ) -> list[dict]:
+        shuffled: list[dict] = []
+        start = 0
+        while start < len(ordered):
+            end = start + 1
+            base_delta = float(ordered[start]["delta"])
+            while end < len(ordered):
+                if abs(float(ordered[end]["delta"]) - base_delta) > delta_tolerance:
+                    break
+                end += 1
+            block = ordered[start:end]
+            if len(block) > 1:
+                perm = self.rng.permutation(len(block))
+                block = [block[int(idx)] for idx in perm.tolist()]
+            shuffled.extend(block)
+            start = end
+        return shuffled
+
+    def _greedy_accept_candidates(self, ordered: list[dict]) -> list[dict]:
         accepted: list[dict] = []
         touched: set[int] = set()
-        for item in candidates:
+        for item in ordered:
             touch_set = set(item["touch_set"])
             if touched.isdisjoint(touch_set):
                 accepted.append(item)
                 touched.update(touch_set)
         return accepted
+
+    def _candidate_family(self, proposal: Proposal) -> str:
+        return str(proposal.kind)
+
+    def _family_diagnostics(
+        self,
+        proposals: list[Proposal],
+        scores: np.ndarray,
+        accepted: list[dict],
+    ) -> dict[str, dict[str, float | int]]:
+        diagnostics: dict[str, dict[str, float | int]] = {
+            family: {
+                "n_proposed": 0,
+                "n_scored": 0,
+                "n_finite": 0,
+                "n_positive": 0,
+                "n_conflict_rejected": 0,
+                "n_committed": 0,
+                "sum_delta_committed": 0.0,
+                "mean_delta_positive": 0.0,
+                "max_delta_positive": 0.0,
+            }
+            for family in self.sampler.family_names
+        }
+        positive_values: dict[str, list[float]] = {
+            family: [] for family in self.sampler.family_names
+        }
+        for proposal, delta in zip(proposals, scores, strict=True):
+            family = self._candidate_family(proposal)
+            record = diagnostics.setdefault(family, {})
+            record["n_proposed"] = int(record.get("n_proposed", 0)) + 1
+            record["n_scored"] = int(record.get("n_scored", 0)) + 1
+            delta = float(delta)
+            if np.isfinite(delta):
+                record["n_finite"] = int(record.get("n_finite", 0)) + 1
+                if delta > 0.0:
+                    record["n_positive"] = int(record.get("n_positive", 0)) + 1
+                    positive_values[family].append(delta)
+        for item in accepted:
+            family = self._candidate_family(item["proposal"])
+            record = diagnostics.setdefault(family, {})
+            record["n_committed"] = int(record.get("n_committed", 0)) + 1
+            record["sum_delta_committed"] = float(
+                record.get("sum_delta_committed", 0.0)
+            ) + float(item["delta"])
+        for family, record in diagnostics.items():
+            positives = positive_values.get(family, [])
+            n_positive = int(record.get("n_positive", 0))
+            n_committed = int(record.get("n_committed", 0))
+            record["n_conflict_rejected"] = max(0, n_positive - n_committed)
+            if positives:
+                record["mean_delta_positive"] = float(np.mean(positives))
+                record["max_delta_positive"] = float(np.max(positives))
+        return diagnostics
+
+    def _oracle_reference_report(
+        self,
+        state: PartitionState,
+        backend,
+        *,
+        max_pairs: int = 128,
+    ) -> dict | None:
+        if self.oracle_reference_labels is None:
+            return None
+        reference = np.asarray(self.oracle_reference_labels, dtype=np.int64)
+        if reference.shape != (state.n_cells,):
+            return None
+        groups_by_reference: dict[int, list[tuple[int, float, int]]] = {}
+        for cluster_id in sorted(state.active_cluster_ids):
+            cells = np.asarray(
+                state.cells_by_cluster[int(cluster_id)].cells, dtype=np.int64
+            )
+            labels = reference[cells]
+            unique, counts = np.unique(labels, return_counts=True)
+            if unique.size == 0:
+                continue
+            best_idx = int(np.argmax(counts))
+            purity = float(counts[best_idx]) / float(len(cells))
+            if purity < 0.6:
+                continue
+            ref_id = int(unique[best_idx])
+            groups_by_reference.setdefault(ref_id, []).append(
+                (int(cluster_id), purity, int(len(cells)))
+            )
+        proposals: list[Proposal] = []
+        annotated_pairs: list[tuple[int, int, int]] = []
+        candidate_groups: list[dict] = []
+        for ref_id, groups in groups_by_reference.items():
+            groups = sorted(groups, key=lambda item: (-item[1], item[2], item[0]))
+            if len(groups) >= 3:
+                candidate_groups.append(
+                    {
+                        "reference_cluster": int(ref_id),
+                        "current_clusters": [
+                            int(cluster_id) for cluster_id, _, _ in groups
+                        ],
+                    }
+                )
+            for idx in range(len(groups)):
+                for jdx in range(idx):
+                    cluster_a = int(groups[jdx][0])
+                    cluster_b = int(groups[idx][0])
+                    proposals.append(
+                        MergeProposal(
+                            cluster_a=min(cluster_a, cluster_b),
+                            cluster_b=max(cluster_a, cluster_b),
+                        )
+                    )
+                    annotated_pairs.append((int(ref_id), cluster_a, cluster_b))
+                    if len(proposals) >= max_pairs:
+                        break
+                if len(proposals) >= max_pairs:
+                    break
+            if len(proposals) >= max_pairs:
+                break
+        if not proposals:
+            return {
+                "positive_pairs": 0,
+                "total_possible_gain": 0.0,
+                "top_positive_merges": [],
+                "candidate_groups": candidate_groups,
+            }
+        scores = backend.score_batch(state, proposals)
+        positive_items = []
+        total_gain = 0.0
+        for (ref_id, cluster_a, cluster_b), delta in zip(
+            annotated_pairs, scores, strict=True
+        ):
+            delta = float(delta)
+            if not np.isfinite(delta) or delta <= 0.0:
+                continue
+            total_gain += delta
+            positive_items.append(
+                {
+                    "reference_cluster": int(ref_id),
+                    "cluster_a": int(cluster_a),
+                    "cluster_b": int(cluster_b),
+                    "delta": delta,
+                }
+            )
+        positive_items.sort(key=lambda item: float(item["delta"]), reverse=True)
+        return {
+            "positive_pairs": int(len(positive_items)),
+            "total_possible_gain": float(total_gain),
+            "top_positive_merges": positive_items[:10],
+            "candidate_groups": candidate_groups[:10],
+        }
+
+    def _augment_with_grouped_block_moves(
+        self,
+        state: PartitionState,
+        backend,
+        proposals: list[Proposal],
+        scores: np.ndarray,
+    ) -> tuple[list[Proposal], np.ndarray, dict[str, int]]:
+        stats = {
+            "positive_single_moves": 0,
+            "source_target_groups": 0,
+            "positive_blocks": 0,
+        }
+        if not self.block_grouping_enabled or len(proposals) == 0:
+            return proposals, scores, stats
+        positive_moves: dict[tuple[int, int], list[tuple[int, float]]] = {}
+        for proposal, delta in zip(proposals, scores, strict=True):
+            if not isinstance(proposal, MoveProposal):
+                continue
+            delta = float(delta)
+            if not np.isfinite(delta) or delta <= 0.0:
+                continue
+            stats["positive_single_moves"] += 1
+            key = (int(proposal.source_cluster), int(proposal.target_cluster))
+            positive_moves.setdefault(key, []).append((int(proposal.cell), delta))
+        if not positive_moves:
+            return proposals, scores, stats
+        stats["source_target_groups"] = len(positive_moves)
+        grouped_proposals: list[Proposal] = []
+        grouped_scores: list[float] = []
+        existing_keys = {self._proposal_key(proposal) for proposal in proposals}
+        for (
+            source_cluster,
+            target_cluster,
+        ), cells_and_scores in positive_moves.items():
+            cells = tuple(sorted({int(cell) for cell, _ in cells_and_scores}))
+            if len(cells) < self.block_grouping_min_cells:
+                continue
+            if len(cells) >= state.cluster_size(int(source_cluster)):
+                continue
+            from .proposals import BlockPayload  # noqa: PLC0415
+
+            block = BlockPayload.from_cells(state, cells)
+            proposal = BlockMoveProposal(
+                block=block,
+                source_cluster=int(source_cluster),
+                target_cluster=int(target_cluster),
+            )
+            key = self._proposal_key(proposal)
+            if key in existing_keys:
+                continue
+            delta = float(backend.score_batch(state, [proposal])[0])
+            if not np.isfinite(delta) or delta <= 0.0:
+                continue
+            grouped_proposals.append(proposal)
+            grouped_scores.append(delta)
+            existing_keys.add(key)
+            stats["positive_blocks"] += 1
+        if not grouped_proposals:
+            return proposals, scores, stats
+        return (
+            [*proposals, *grouped_proposals],
+            np.concatenate(
+                [
+                    np.asarray(scores, dtype=np.float64),
+                    np.asarray(grouped_scores, dtype=np.float64),
+                ]
+            ),
+            stats,
+        )
+
+    def _should_run_merge_closure(self, state: PartitionState, stage: str) -> bool:
+        if not self.merge_closure_enabled:
+            return False
+        if len(state.active_cluster_ids) < 2:
+            return False
+        if stage == "coarsen":
+            return True
+        if stage == "balanced":
+            return True
+        return self.search_policy == self.GPU_STRUCTURED_POLICY
+
+    def _build_merge_closure_candidates(
+        self,
+        state: PartitionState,
+        *,
+        n_pairs: int,
+    ) -> list[Proposal]:
+        if self.merge_closure_candidate_mode == "idf_shared_gene":
+            return self.sampler.sample_guided_merge_pairs(
+                state,
+                n_pairs,
+                epsilon_uniform=self.merge_closure_epsilon_uniform,
+                include_cached_pairs=True,
+            )
+        return self._build_greedy_merge_candidates(state, n_pairs)
+
+    def _merge_closure_phase(
+        self,
+        state: PartitionState,
+        backend,
+        *,
+        stage: str,
+        reason: str,
+    ) -> dict:
+        if not self._should_run_merge_closure(state, stage):
+            return {
+                "n_steps": 0,
+                "delta": 0.0,
+                "operations": [],
+                "stage": stage,
+                "reason": reason,
+                "n_batches": 0,
+                "stall_batches": 0,
+                "batches": [],
+            }
+        total_delta = 0.0
+        operations: list[dict] = []
+        batch_records: list[dict] = []
+        stall_batches = 0
+        for batch_idx in range(self.merge_closure_max_batches):
+            self.sampler.prepare_round(state)
+            proposals = self._build_merge_closure_candidates(
+                state,
+                n_pairs=self.merge_closure_pairs_per_batch,
+            )
+            if not proposals:
+                stall_batches += 1
+                batch_records.append(
+                    {
+                        "batch": int(batch_idx),
+                        "n_proposed": 0,
+                        "n_scored": 0,
+                        "n_positive": 0,
+                        "n_committed": 0,
+                        "delta": 0.0,
+                    }
+                )
+                if stall_batches >= self.merge_closure_stall_batches:
+                    break
+                continue
+            scores = backend.score_batch(state, proposals)
+            positive = [
+                item
+                for item in self._positive_candidates(proposals, scores)
+                if float(item["delta"]) > float(self.merge_closure_min_delta)
+            ]
+            accepted = self._select_positive_nonconflicting_candidates(
+                positive, backend=backend
+            )
+            batch_delta = float(sum(float(item["delta"]) for item in accepted))
+            batch_records.append(
+                {
+                    "batch": int(batch_idx),
+                    "n_proposed": int(len(proposals)),
+                    "n_scored": int(len(proposals)),
+                    "n_positive": int(len(positive)),
+                    "n_committed": int(len(accepted)),
+                    "delta": batch_delta,
+                }
+            )
+            if not accepted:
+                stall_batches += 1
+                if stall_batches >= self.merge_closure_stall_batches:
+                    break
+                continue
+            stall_batches = 0
+            self._assert_disjoint_touch_sets(accepted)
+            touched_clusters = self._commit_batch(state, accepted)
+            self.sampler.notify_state_changed(state, touched_clusters)
+            total_delta += batch_delta
+            operations.extend(
+                self._proposal_to_record(item["proposal"], item["delta"])
+                for item in accepted
+            )
+        return {
+            "n_steps": len(operations),
+            "delta": total_delta,
+            "operations": operations,
+            "stage": stage,
+            "reason": reason,
+            "n_batches": len(batch_records),
+            "stall_batches": stall_batches,
+            "batches": batch_records,
+        }
 
     def _should_run_full_merge(self, state: PartitionState, stage: str) -> bool:
         return (
@@ -1337,6 +2031,175 @@ class Optimizer:
             unique[self._proposal_key(proposal)] = proposal
             attempts += 1
         return list(unique.values())
+
+    def _allow_peel_in_stage(self, state: PartitionState, stage: str) -> bool:
+        if stage != "coarsen":
+            return True
+        return len(state.active_cluster_ids) <= self._target_cluster_count(state)
+
+    def _batched_reassignment_cells(self, state: PartitionState) -> np.ndarray:
+        if state.n_cells <= self.batched_reassign_cells:
+            return self.rng.permutation(state.n_cells).astype(np.int64, copy=False)
+        sampled = self.rng.choice(
+            state.n_cells,
+            size=self.batched_reassign_cells,
+            replace=False,
+        )
+        return np.asarray(sampled, dtype=np.int64)
+
+    def _batched_reassignment_cleanup(
+        self,
+        state: PartitionState,
+        backend,
+        *,
+        stage: str,
+    ) -> dict:
+        if self.batched_reassign_passes <= 0 or len(state.active_cluster_ids) < 2:
+            return {
+                "n_steps": 0,
+                "delta": 0.0,
+                "operations": [],
+                "n_passes": 0,
+                "move_grouping": {
+                    "positive_single_moves": 0,
+                    "source_target_groups": 0,
+                    "positive_blocks": 0,
+                },
+            }
+        total_delta = 0.0
+        operations: list[dict] = []
+        passes_run = 0
+        grouping_totals = {
+            "positive_single_moves": 0,
+            "source_target_groups": 0,
+            "positive_blocks": 0,
+        }
+        allow_peel = self._allow_peel_in_stage(state, stage)
+
+        for _ in range(self.batched_reassign_passes):
+            self.sampler.prepare_round(state)
+            cells = self._batched_reassignment_cells(state)
+            proposals: dict[tuple, Proposal] = {}
+            exhaustive = (
+                len(state.active_cluster_ids) <= self.exhaustive_reassign_active_limit
+            )
+            for cell in cells.tolist():
+                cell = int(cell)
+                source_cluster = int(state.z[cell])
+                if source_cluster not in state.active_cluster_ids:
+                    continue
+                genes, values = state.cell_counts(cell)
+                if exhaustive:
+                    targets = [
+                        int(cluster_id)
+                        for cluster_id in state.active_cluster_array().tolist()
+                        if int(cluster_id) != source_cluster
+                    ]
+                else:
+                    candidate_targets = self.sampler._candidate_targets_for_payload(
+                        state,
+                        source_cluster,
+                        np.asarray(genes, dtype=np.int64),
+                        np.asarray(values, dtype=np.int64),
+                    )
+                    ranked_targets = self.sampler.rank_target_clusters(
+                        state,
+                        source_cluster,
+                        np.asarray(genes, dtype=np.int64),
+                        np.asarray(values, dtype=np.int64),
+                        limit=self.batched_reassign_guided_targets,
+                        candidate_targets=candidate_targets,
+                    )
+                    targets = [int(target) for target in ranked_targets]
+                    if self.batched_reassign_uniform_targets > 0:
+                        active = state.active_cluster_array()
+                        uniform_pool = active[active != source_cluster]
+                        if uniform_pool.size:
+                            take = min(
+                                int(self.batched_reassign_uniform_targets),
+                                int(uniform_pool.size),
+                            )
+                            extra = self.rng.choice(
+                                uniform_pool,
+                                size=take,
+                                replace=False,
+                            )
+                            targets.extend(int(target) for target in extra.tolist())
+                    targets = [
+                        int(cluster_id)
+                        for cluster_id in dict.fromkeys(targets)
+                        if int(cluster_id) != source_cluster
+                    ]
+                for target_cluster in targets:
+                    proposal = MoveProposal(
+                        cell=cell,
+                        source_cluster=source_cluster,
+                        target_cluster=int(target_cluster),
+                    )
+                    proposals[self._proposal_key(proposal)] = proposal
+                if allow_peel and state.cluster_size(source_cluster) > 1:
+                    peel = PeelProposal(cell=cell, source_cluster=source_cluster)
+                    proposals[self._proposal_key(peel)] = peel
+            if not proposals:
+                break
+
+            proposal_list = list(proposals.values())
+            scores = backend.score_batch(state, proposal_list)
+            best_by_cell: dict[int, tuple[Proposal, float]] = {}
+            for proposal, delta in zip(proposal_list, scores, strict=True):
+                delta = float(delta)
+                if not np.isfinite(delta) or delta <= 0.0:
+                    continue
+                if isinstance(proposal, (MoveProposal, PeelProposal)):
+                    cell = int(proposal.cell)
+                    best = best_by_cell.get(cell)
+                    if best is None or delta > best[1]:
+                        best_by_cell[cell] = (proposal, delta)
+            if not best_by_cell:
+                passes_run += 1
+                break
+            selected_proposals = [proposal for proposal, _ in best_by_cell.values()]
+            selected_scores = np.asarray(
+                [delta for _, delta in best_by_cell.values()],
+                dtype=np.float64,
+            )
+            (
+                selected_proposals,
+                selected_scores,
+                grouping_stats,
+            ) = self._augment_with_grouped_block_moves(
+                state,
+                backend,
+                selected_proposals,
+                selected_scores,
+            )
+            for key, value in grouping_stats.items():
+                grouping_totals[key] += int(value)
+            accepted = self._select_positive_nonconflicting(
+                selected_proposals,
+                selected_scores,
+                backend=backend,
+            )
+            if not accepted:
+                passes_run += 1
+                break
+            self._assert_disjoint_touch_sets(accepted)
+            touched_clusters = self._commit_batch(state, accepted)
+            self.sampler.notify_state_changed(state, touched_clusters)
+            batch_delta = float(sum(float(item["delta"]) for item in accepted))
+            total_delta += batch_delta
+            operations.extend(
+                self._proposal_to_record(item["proposal"], item["delta"])
+                for item in accepted
+            )
+            passes_run += 1
+        return {
+            "n_steps": len(operations),
+            "delta": total_delta,
+            "operations": operations,
+            "n_passes": passes_run,
+            "move_grouping": grouping_totals,
+        }
 
     def _should_run_exact_cell_reassign(self, state: PartitionState) -> bool:
         return (

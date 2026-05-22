@@ -1,9 +1,16 @@
 import numpy as np
 from scipy import sparse
 
+from mcellstate.backends import CPUBackend
+from mcellstate.likelihood import full_partition_log_likelihood
 from mcellstate.optimizer import Optimizer
 from mcellstate.prior import make_prior
-from mcellstate.proposals import MergeProposal, MoveProposal, PeelProposal
+from mcellstate.proposals import (
+    BlockMoveProposal,
+    MergeProposal,
+    MoveProposal,
+    PeelProposal,
+)
 from mcellstate.state import PartitionState
 from mcellstate.validation import generate_synthetic_dataset, rand_index
 from mcellstate.warm_start import overclustered_leiden_labels
@@ -171,7 +178,7 @@ def test_optimizer_can_run_until_no_improvement():
     )
 
 
-def test_gpu_mode_disables_cpu_heavy_refinement_phases():
+def test_gpu_fast_weak_policy_keeps_legacy_disabled_phases():
     synthetic = generate_synthetic_dataset(
         n_clusters=3,
         cells_per_cluster=6,
@@ -193,6 +200,7 @@ def test_gpu_mode_disables_cpu_heavy_refinement_phases():
         seed=43,
     )
 
+    assert optimizer.search_policy == Optimizer.GPU_FAST_WEAK_POLICY
     assert optimizer.full_merge_stage is False
     assert optimizer.greedy_merge_sweeps == 0
     assert optimizer.exact_cell_reassign_passes == 0
@@ -202,7 +210,7 @@ def test_gpu_mode_disables_cpu_heavy_refinement_phases():
     assert optimizer.perturb_steps == 0
     assert optimizer.backend_threads >= 2
     assert optimizer.recompute_ll_each_round is False
-    assert optimizer.cuda_chunk_size is None
+    assert optimizer.cuda_chunk_size == 8192
     assert optimizer.sampler.random_proposals is True
     assert optimizer.sampler.max_unique_proposals == 200
     optimizer._configure_stage(state, "coarsen")
@@ -215,6 +223,246 @@ def test_gpu_mode_disables_cpu_heavy_refinement_phases():
     )
     assert weights["block_peel"] == 0.0
     assert weights["block_move"] == 0.0
+
+
+def test_cuda_backend_defaults_to_structured_search_policy():
+    synthetic = generate_synthetic_dataset(
+        n_clusters=3,
+        cells_per_cluster=5,
+        n_genes=18,
+        marker_strength=25.0,
+        seed=70,
+    )
+    state = PartitionState.from_csr(
+        synthetic.X, init="leiden_overclustered", seed=70, n_clusters=9
+    )
+    psi = make_prior(synthetic.X, tau=1.0)
+
+    optimizer = Optimizer(
+        state=state,
+        psi=psi,
+        backend="cuda",
+        optimizer_mode=Optimizer.EFFECTIVE_MODE,
+        n_proposals=256,
+        seed=70,
+    )
+
+    assert optimizer.search_policy == Optimizer.GPU_STRUCTURED_POLICY
+    assert optimizer.merge_closure_enabled is True
+    assert optimizer.random_proposals is False
+    assert optimizer.greedy_merge_sweeps >= 1
+    assert optimizer.exact_cell_reassign_passes >= 1
+    assert optimizer.cluster_reassign_sweeps >= 1
+    assert optimizer.serial_refine_passes >= 1
+
+
+def test_merge_closure_recovers_artificially_split_clusters():
+    synthetic = generate_synthetic_dataset(
+        n_clusters=2,
+        cells_per_cluster=4,
+        n_genes=16,
+        marker_strength=32.0,
+        seed=71,
+    )
+    z_split = np.asarray([0, 1, 0, 1, 2, 3, 2, 3], dtype=np.int64)
+    state = PartitionState.from_assignment(synthetic.X, z_split)
+    psi = make_prior(synthetic.X, tau=1.0)
+    optimizer = Optimizer(
+        state=state,
+        psi=psi,
+        backend="cpu",
+        search_policy=Optimizer.GPU_STRUCTURED_POLICY,
+        n_proposals=256,
+        seed=71,
+        full_merge_stage=False,
+        greedy_merge_sweeps=0,
+        exact_cell_reassign_passes=0,
+        cluster_reassign_sweeps=0,
+        serial_refine_passes=0,
+        merge_closure_max_batches=4,
+        merge_closure_pairs_per_batch=128,
+    )
+    backend = CPUBackend(psi, state)
+    before_ll = full_partition_log_likelihood(state, psi)
+
+    result = optimizer._merge_closure_phase(
+        state,
+        backend,
+        stage="coarsen",
+        reason="test",
+    )
+    after_ll = full_partition_log_likelihood(state, psi)
+
+    assert result["n_steps"] >= 1
+    assert after_ll > before_ll
+    assert len(state.active_cluster_ids) < len(np.unique(z_split))
+    state.validate()
+
+
+def test_guided_move_sampler_prefers_overlap_target_with_uniform_support():
+    X = sparse.csr_matrix(
+        np.asarray(
+            [
+                [8, 7, 0],
+                [7, 6, 0],
+                [9, 8, 0],
+                [8, 7, 0],
+                [0, 0, 9],
+                [0, 0, 8],
+            ],
+            dtype=np.int64,
+        ),
+    )
+    state = PartitionState.from_assignment(
+        X,
+        np.asarray([0, 0, 1, 1, 2, 2], dtype=np.int64),
+    )
+    psi = np.full(X.shape[1], 0.5, dtype=np.float64)
+    optimizer = Optimizer(
+        state=state,
+        psi=psi,
+        backend="cpu",
+        n_proposals=64,
+        seed=72,
+    )
+    sampler = optimizer.sampler
+    sampler.move_uniform_prob = 0.15
+    sampler.prepare_round(state)
+    sampler._sample_non_singleton_cluster = lambda state_arg: 0  # type: ignore[method-assign]
+    sampler._sample_low_fit_cell = (  # type: ignore[method-assign]
+        lambda state_arg, source_cluster: 0
+    )
+    sampler._sample_non_singleton_cell = lambda state_arg: (0, 0)  # type: ignore[method-assign]
+
+    counts = {1: 0, 2: 0}
+    for _ in range(400):
+        proposal = sampler._sample_move_biased(state)
+        assert proposal is not None
+        counts[int(proposal.target_cluster)] += 1
+
+    assert counts[1] > counts[2]
+    assert counts[2] > 0
+
+
+def test_block_move_grouping_adds_exact_positive_block_and_preserves_counts():
+    X = sparse.csr_matrix(
+        np.asarray(
+            [
+                [8, 0, 0],
+                [7, 0, 0],
+                [0, 8, 0],
+                [9, 0, 0],
+                [8, 0, 0],
+                [0, 8, 0],
+                [0, 7, 0],
+            ],
+            dtype=np.int64,
+        ),
+    )
+    state = PartitionState.from_assignment(
+        X,
+        np.asarray([0, 0, 0, 1, 1, 2, 2], dtype=np.int64),
+    )
+    psi = np.full(X.shape[1], 0.5, dtype=np.float64)
+    optimizer = Optimizer(
+        state=state,
+        psi=psi,
+        backend="cpu",
+        search_policy=Optimizer.GPU_STRUCTURED_POLICY,
+        n_proposals=64,
+        seed=73,
+    )
+    backend = CPUBackend(psi, state)
+    proposals = [
+        MoveProposal(cell=0, source_cluster=0, target_cluster=1),
+        MoveProposal(cell=1, source_cluster=0, target_cluster=1),
+    ]
+    scores = backend.score_batch(state, proposals)
+
+    augmented, augmented_scores, stats = optimizer._augment_with_grouped_block_moves(
+        state,
+        backend,
+        proposals,
+        scores,
+    )
+    block_indices = [
+        idx
+        for idx, proposal in enumerate(augmented)
+        if isinstance(proposal, BlockMoveProposal)
+    ]
+
+    assert stats["positive_single_moves"] == 2
+    assert stats["source_target_groups"] == 1
+    assert stats["positive_blocks"] >= 1
+    assert block_indices
+
+    block_idx = block_indices[0]
+    block_proposal = augmented[block_idx]
+    block_delta = float(augmented_scores[block_idx])
+    assert isinstance(block_proposal, BlockMoveProposal)
+
+    before_ll = full_partition_log_likelihood(state, psi)
+    touched = optimizer._commit_batch(
+        state,
+        [
+            {
+                "proposal": block_proposal,
+                "delta": block_delta,
+                "touch_set": block_proposal.touch_set(),
+                "touch_ids": block_proposal.touch_ids(),
+            }
+        ],
+    )
+    after_ll = full_partition_log_likelihood(state, psi)
+
+    assert touched == {0, 1}
+    assert np.isclose(after_ll - before_ll, block_delta)
+    state.validate()
+
+
+def test_gpu_structured_reaches_at_least_gpu_fast_weak_likelihood_on_synthetic():
+    synthetic = generate_synthetic_dataset(
+        n_clusters=3,
+        cells_per_cluster=4,
+        n_genes=16,
+        marker_strength=28.0,
+        seed=74,
+    )
+    init_state = PartitionState.from_csr(
+        synthetic.X, init="leiden_overclustered", seed=74, n_clusters=10
+    )
+    psi = make_prior(synthetic.X, tau=1.0)
+
+    fast = Optimizer(
+        state=init_state.copy(),
+        psi=psi,
+        backend="cpu",
+        search_policy=Optimizer.GPU_FAST_WEAK_POLICY,
+        n_proposals=512,
+        seed=74,
+    ).fit(
+        max_rounds=6,
+        restarts=1,
+        stall_rounds=3,
+        improvement_window=3,
+        eta=0.0,
+    )
+    structured = Optimizer(
+        state=init_state.copy(),
+        psi=psi,
+        backend="cpu",
+        search_policy=Optimizer.GPU_STRUCTURED_POLICY,
+        n_proposals=512,
+        seed=74,
+    ).fit(
+        max_rounds=6,
+        restarts=1,
+        stall_rounds=3,
+        improvement_window=3,
+        eta=0.0,
+    )
+
+    assert structured.log_likelihood >= fast.log_likelihood
 
 
 def test_random_walk_accepts_finite_bad_non_merge_moves():
@@ -275,6 +523,7 @@ def test_optimizer_uses_backend_selection_hook_when_available():
         backend="cpu",
         n_proposals=16,
         seed=47,
+        multi_greedy_trials=1,
         cluster_reassign_sweeps=0,
         perturb_every=0,
         serial_refine_passes=0,

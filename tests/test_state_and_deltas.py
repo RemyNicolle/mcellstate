@@ -10,6 +10,7 @@ from mcellstate.likelihood import (
     full_partition_log_likelihood,
 )
 from mcellstate.state import PartitionState, SparseCountVector
+from mcellstate.validation import generate_synthetic_dataset
 
 
 def make_test_state() -> tuple[PartitionState, np.ndarray]:
@@ -74,8 +75,12 @@ def test_block_deltas_match_cell_special_cases():
     peel_block_delta = delta_peel_block(state.clusters[0], genes, counts, psi)
     assert np.isclose(peel_cell_delta, peel_block_delta)
 
-    move_cell_delta = delta_move_cell(state, psi, cell=cell, target_cluster=1, source_cluster=0)
-    move_block_delta = delta_move_block(state.clusters[0], state.clusters[1], genes, counts, psi)
+    move_cell_delta = delta_move_cell(
+        state, psi, cell=cell, target_cluster=1, source_cluster=0
+    )
+    move_block_delta = delta_move_block(
+        state.clusters[0], state.clusters[1], genes, counts, psi
+    )
     assert np.isclose(move_cell_delta, move_block_delta)
 
 
@@ -129,3 +134,31 @@ def test_state_likelihood_cache_tracks_mutations():
     cached_after = state.total_log_likelihood_cached(psi)
     direct_after = full_partition_log_likelihood(state, psi)
     assert np.isclose(cached_after, direct_after)
+
+
+def test_additional_initialization_modes_produce_valid_partitions():
+    synthetic = generate_synthetic_dataset(
+        n_clusters=3,
+        cells_per_cluster=5,
+        n_genes=20,
+        marker_strength=24.0,
+        seed=75,
+    )
+
+    random_online = PartitionState.from_csr(
+        synthetic.X,
+        init="random_online",
+        seed=75,
+        n_clusters=6,
+    )
+    leiden_less = PartitionState.from_csr(
+        synthetic.X,
+        init="leiden_less_overclustered",
+        seed=75,
+        n_clusters=6,
+    )
+
+    random_online.validate()
+    leiden_less.validate()
+    assert 1 < len(random_online.active_cluster_ids) <= synthetic.X.shape[0]
+    assert 1 < len(leiden_less.active_cluster_ids) <= synthetic.X.shape[0]

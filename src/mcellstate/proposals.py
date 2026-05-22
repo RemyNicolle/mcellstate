@@ -214,6 +214,7 @@ class ProposalSampler:
         self._bad_cell_candidates: dict[int, np.ndarray] = {}
         self._psi: np.ndarray | None = None
         self._trace: Callable[[str], None] | None = None
+        self.last_batch_stats: dict | None = None
 
     def set_scoring_context(self, psi: np.ndarray | None) -> None:
         self._psi = None if psi is None else np.asarray(psi, dtype=np.float64)
@@ -782,6 +783,10 @@ class ProposalSampler:
         draw_count = self._proposal_draw_count(requested_proposals)
         family_counts = self.rng.multinomial(draw_count, self.family_weights)
         proposals: list[Proposal] = []
+        family_stats: dict[str, dict[str, float | int]] = {
+            family_name: {"requested": 0, "produced": 0, "time_s": 0.0}
+            for family_name in self.family_names
+        }
 
         deterministic_budget = 0
         if not self.random_proposals:
@@ -850,6 +855,9 @@ class ProposalSampler:
                 self._emit_trace(
                     f"sampler family={family_name} requested={int(record['count'])} produced={len(family_props)} time_s={float(record['elapsed']):.3f}",
                 )
+                family_stats[family_name]["requested"] = int(record["count"])
+                family_stats[family_name]["produced"] = len(family_props)
+                family_stats[family_name]["time_s"] = float(record["elapsed"])
         else:
             for family_name, count in family_tasks:
                 family_start = time.perf_counter()
@@ -859,6 +867,9 @@ class ProposalSampler:
                 self._emit_trace(
                     f"sampler family={family_name} requested={count} produced={len(family_props)} time_s={family_end - family_start:.3f}",
                 )
+                family_stats[family_name]["requested"] = int(count)
+                family_stats[family_name]["produced"] = len(family_props)
+                family_stats[family_name]["time_s"] = float(family_end - family_start)
         before_dedupe = len(proposals)
         proposals = self._deduplicate_proposals(proposals, active_set=active_set)
         if len(proposals) != before_dedupe:
@@ -874,6 +885,14 @@ class ProposalSampler:
         self._emit_trace(
             f"sampler sample_batch done total_props={len(proposals)} total_s={time.perf_counter() - start:.3f}"
         )
+        self.last_batch_stats = {
+            "requested": int(requested_proposals),
+            "draw_count": int(draw_count),
+            "before_dedupe": int(before_dedupe),
+            "before_cap": int(before_cap),
+            "total_props": int(len(proposals)),
+            "family_stats": family_stats,
+        }
         return proposals
 
     def _proposal_draw_count(self, requested_proposals: int) -> int:
@@ -1026,9 +1045,19 @@ class ProposalSampler:
                 else:
                     raise ValueError(f"unknown proposal family: {family!r}")
             elif family == "move":
-                proposal = self._sample_move_uniform(state)
+                use_uniform = self.rng.random() < self.move_uniform_prob
+                proposal = (
+                    self._sample_move_uniform(state)
+                    if use_uniform
+                    else self._sample_move_biased(state)
+                )
             elif family == "block_move":
-                proposal = self._sample_block_move_uniform(state)
+                use_uniform = self.rng.random() < self.block_move_uniform_prob
+                proposal = (
+                    self._sample_block_move_uniform(state)
+                    if use_uniform
+                    else self._sample_block_move_biased(state)
+                )
             else:
                 if family == "merge":
                     uniform_prob = self.merge_uniform_prob
@@ -1226,7 +1255,143 @@ class ProposalSampler:
         )
 
     def _sample_move_biased(self, state: PartitionState) -> MoveProposal | None:
-        return self._sample_move_uniform(state)
+        source_cluster = self._sample_non_singleton_cluster(state)
+        if source_cluster is None:
+            return self._sample_move_uniform(state)
+        if self.rng.random() < 0.5:
+            cell = self._sample_low_fit_cell(state, source_cluster)
+        else:
+            sampled = self._sample_non_singleton_cell(state)
+            if sampled is None:
+                return self._sample_move_uniform(state)
+            cell, source_cluster = sampled
+            source_cluster = int(source_cluster)
+            cell = int(cell)
+        genes, values = state.cell_counts(int(cell))
+        candidate_targets = self._candidate_targets_for_payload(
+            state,
+            int(source_cluster),
+            np.asarray(genes, dtype=np.int64),
+            np.asarray(values, dtype=np.int64),
+        )
+        targets = self.rank_target_clusters(
+            state,
+            int(source_cluster),
+            np.asarray(genes, dtype=np.int64),
+            np.asarray(values, dtype=np.int64),
+            limit=self.move_neighbor_limit,
+            candidate_targets=candidate_targets,
+        )
+        target_cluster: int | None = None
+        if targets and self.rng.random() >= self.move_uniform_prob:
+            ranked = np.asarray(targets, dtype=np.int64)
+            weights = np.linspace(
+                float(ranked.size), 1.0, int(ranked.size), dtype=np.float64
+            )
+            weights = weights / float(weights.sum())
+            target_cluster = int(self.rng.choice(ranked, p=weights))
+        if target_cluster is None:
+            target_cluster = self._sample_uniform_target(int(source_cluster))
+        if target_cluster is None or int(target_cluster) == int(source_cluster):
+            return None
+        return MoveProposal(
+            cell=int(cell),
+            source_cluster=int(source_cluster),
+            target_cluster=int(target_cluster),
+        )
+
+    def sample_guided_merge_pairs(
+        self,
+        state: PartitionState,
+        n_pairs: int,
+        *,
+        epsilon_uniform: float = 0.05,
+        include_cached_pairs: bool = True,
+    ) -> list[MergeProposal]:
+        self.prepare_round(state)
+        n_pairs = max(0, int(n_pairs))
+        if n_pairs <= 0 or self._active_clusters.size < 2:
+            return []
+        epsilon_uniform = max(0.0, min(1.0, float(epsilon_uniform)))
+        active_set = set(
+            int(cluster_id) for cluster_id in self._active_clusters.tolist()
+        )
+        unique: dict[tuple[int, int], MergeProposal] = {}
+
+        if include_cached_pairs and self._deterministic_merge_pairs:
+            cached_budget = min(
+                len(self._deterministic_merge_pairs), max(1, n_pairs // 4)
+            )
+            for cluster_a, cluster_b in self._deterministic_merge_pairs[:cached_budget]:
+                if int(cluster_a) not in active_set or int(cluster_b) not in active_set:
+                    continue
+                pair = (
+                    min(int(cluster_a), int(cluster_b)),
+                    max(int(cluster_a), int(cluster_b)),
+                )
+                unique[pair] = MergeProposal(cluster_a=pair[0], cluster_b=pair[1])
+                if len(unique) >= n_pairs:
+                    return list(unique.values())
+
+        gene_ids: list[int] = []
+        gene_weights: list[float] = []
+        for gene, cluster_ids in state.gene_to_clusters.items():
+            active_gene_clusters = [
+                int(cluster_id)
+                for cluster_id in cluster_ids
+                if int(cluster_id) in active_set
+            ]
+            if len(active_gene_clusters) < 2:
+                continue
+            idf = max(float(self._idf_weights[int(gene)]), 0.0)
+            if idf <= 0.0:
+                continue
+            pair_count = (
+                len(active_gene_clusters) * (len(active_gene_clusters) - 1) / 2.0
+            )
+            weight = idf * pair_count
+            if weight <= 0.0:
+                continue
+            gene_ids.append(int(gene))
+            gene_weights.append(float(weight))
+
+        gene_ids_arr = np.asarray(gene_ids, dtype=np.int64)
+        gene_weights_arr = np.asarray(gene_weights, dtype=np.float64)
+        if gene_weights_arr.size:
+            gene_weights_arr = gene_weights_arr / float(gene_weights_arr.sum())
+
+        attempts = 0
+        max_attempts = max(n_pairs * 16, 64)
+        while len(unique) < n_pairs and attempts < max_attempts:
+            attempts += 1
+            if gene_ids_arr.size == 0 or self.rng.random() < epsilon_uniform:
+                proposal = self._sample_merge_uniform(state)
+            else:
+                gene = int(self.rng.choice(gene_ids_arr, p=gene_weights_arr))
+                cluster_ids = self._candidate_clusters_for_gene(state, gene)
+                cluster_ids = np.asarray(
+                    [
+                        int(cluster_id)
+                        for cluster_id in cluster_ids.tolist()
+                        if int(cluster_id) in active_set
+                    ],
+                    dtype=np.int64,
+                )
+                if cluster_ids.size < 2:
+                    continue
+                if cluster_ids.size > self.merge_gene_cluster_cap:
+                    cluster_ids = cluster_ids[: self.merge_gene_cluster_cap]
+                choice = self.rng.choice(cluster_ids, size=2, replace=False)
+                cluster_a, cluster_b = sorted((int(choice[0]), int(choice[1])))
+                proposal = MergeProposal(cluster_a=cluster_a, cluster_b=cluster_b)
+            if proposal is None:
+                continue
+            pair = (
+                min(int(proposal.cluster_a), int(proposal.cluster_b)),
+                max(int(proposal.cluster_a), int(proposal.cluster_b)),
+            )
+            unique.setdefault(pair, MergeProposal(cluster_a=pair[0], cluster_b=pair[1]))
+        return list(unique.values())
 
     def _sample_block_peel_uniform(
         self, state: PartitionState
