@@ -354,7 +354,7 @@ class Optimizer:
                 self.backend_threads = max(4, min(32, os.cpu_count() or 4))
             self.random_proposals = False
             if self.max_scored_proposals is None:
-                self.max_scored_proposals = int(self.n_proposals)
+                self.max_scored_proposals = min(int(self.n_proposals), 20_000)
             if self.proposal_batch_size is None or self.proposal_batch_size < 8192:
                 self.proposal_batch_size = min(
                     int(self.n_proposals),
@@ -586,7 +586,9 @@ class Optimizer:
                         restart=restart,
                         round_idx=round_idx,
                         stage=stage,
-                        message=f"sample {self.n_proposals} proposals",
+                        message=(
+                            f"sample {self._effective_round_proposal_count()} proposals"
+                        ),
                     )
                 (
                     proposals,
@@ -1107,6 +1109,12 @@ class Optimizer:
             remaining -= count
         return counts
 
+    def _effective_round_proposal_count(self) -> int:
+        total = max(0, int(self.n_proposals))
+        if self.max_scored_proposals is None:
+            return total
+        return min(total, max(0, int(self.max_scored_proposals)))
+
     def _sample_proposal_chunk(
         self,
         state: PartitionState,
@@ -1133,7 +1141,7 @@ class Optimizer:
     def _sample_and_score_proposals(
         self, state: PartitionState, backend
     ) -> tuple[list[Proposal], np.ndarray, float, float, int]:
-        chunk_sizes = self._proposal_chunk_sizes(self.n_proposals)
+        chunk_sizes = self._proposal_chunk_sizes(self._effective_round_proposal_count())
         if not chunk_sizes:
             return [], np.empty(0, dtype=np.float64), 0.0, 0.0, 0
 
@@ -1203,16 +1211,17 @@ class Optimizer:
             return
         if chunk_count <= 1:
             return
+        round_total = max(1, self._effective_round_proposal_count())
         current = max(1, int(self.proposal_batch_size))
         should_grow = chunk_count > 4 or proposal_s > 1.5 * scoring_s
         if should_grow:
-            current = min(int(self.n_proposals), max(current + 1, current * 2))
+            current = min(round_total, max(current + 1, current * 2))
         elif (
             getattr(backend, "device", None) is not None
             and getattr(backend.device, "type", None) == "cuda"
-            and current < int(self.n_proposals)
+            and current < round_total
         ):
-            current = min(int(self.n_proposals), max(current + 1, current * 2))
+            current = min(round_total, max(current + 1, current * 2))
         self.proposal_batch_size = current
 
     def _make_restart_state(

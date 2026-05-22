@@ -616,6 +616,55 @@ def test_optimizer_samples_proposals_in_chunks():
     assert scoring_s >= 0.0
 
 
+def test_max_scored_proposals_caps_total_round_work_across_chunks():
+    synthetic = generate_synthetic_dataset(
+        n_clusters=3,
+        cells_per_cluster=2,
+        n_genes=12,
+        marker_strength=25.0,
+        seed=49,
+    )
+    state = PartitionState.from_csr(
+        synthetic.X, init=np.asarray([0, 0, 1, 1, 2, 2], dtype=np.int64)
+    )
+    psi = make_prior(synthetic.X, tau=1.0)
+
+    optimizer = Optimizer(
+        state=state,
+        psi=psi,
+        backend="cpu",
+        n_proposals=10,
+        max_scored_proposals=4,
+        proposal_batch_size=3,
+        seed=49,
+        cluster_reassign_sweeps=0,
+        perturb_every=0,
+        serial_refine_passes=0,
+        random_accept_prob=0.0,
+    )
+
+    calls: list[int] = []
+
+    def fake_sample_chunk(state_arg, backend_arg, count, seed):  # noqa: ARG001
+        calls.append(int(count))
+        return [MergeProposal(0, 1)] * int(count)
+
+    class DummyBackend:
+        def score_batch(self, state_arg, proposals):  # noqa: ARG002
+            return np.ones(len(proposals), dtype=np.float64)
+
+    optimizer._sample_proposal_chunk = fake_sample_chunk  # type: ignore[method-assign]
+    proposals, scores, _, _, chunk_count = optimizer._sample_and_score_proposals(
+        state,
+        DummyBackend(),
+    )
+
+    assert calls == [3, 1]
+    assert chunk_count == 2
+    assert len(proposals) == 4
+    assert scores.shape == (4,)
+
+
 def test_cpu_only_mode_enables_parallel_proposal_sampling_defaults():
     synthetic = generate_synthetic_dataset(
         n_clusters=3,

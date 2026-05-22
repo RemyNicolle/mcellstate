@@ -152,7 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-scored-proposals",
         type=int,
         default=None,
-        help="Optional cap after deduplication; GPU modes default to 25000.",
+        help="Optional total per-round cap on scored proposals after sampling; structured GPU mode uses a bounded default when omitted.",
     )
     fit.add_argument(
         "--random-proposals",

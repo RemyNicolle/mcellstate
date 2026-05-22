@@ -221,15 +221,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--restarts",
         type=int,
-        default=None,
-        help="Restart count. Omit to use the preset default; gpu preset currently defaults to multiple restarts.",
+        default=1,
+        help="Restart count. Defaults to 1 for batch throughput; override for higher-quality multi-restart runs.",
     )
-    parser.add_argument("--n-proposals", type=int, default=100_000)
+    parser.add_argument(
+        "--n-proposals",
+        type=int,
+        default=25_000,
+        help="Per-round proposal budget. Defaults to a bounded structured GPU batch size for throughput.",
+    )
     parser.add_argument(
         "--max-scored-proposals",
         type=int,
-        default=None,
-        help="Optional cap after deduplication. Omit to use the preset/backend default.",
+        default=20_000,
+        help="Per-round cap on actually scored proposals. Defaults to a bounded structured GPU run.",
     )
     parser.add_argument(
         "--random-proposals", dest="random_proposals", action="store_true"
