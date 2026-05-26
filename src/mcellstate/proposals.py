@@ -194,6 +194,8 @@ class ProposalSampler:
         self.rng = np.random.default_rng(seed)
 
         self._prepared_version: int | None = None
+        self._bad_cell_cache_ready = False
+        self._merge_guidance_ready = False
         self._pending_signature_refresh: set[int] = set()
         self._pending_gene_refresh: set[int] = set()
         self._active_clusters = np.empty(0, dtype=np.int64)
@@ -261,11 +263,22 @@ class ProposalSampler:
             int(gene) for gene in np.asarray(state.last_touched_genes, dtype=np.int64)
         )
 
-    def prepare_round(self, state: PartitionState) -> None:
-        if self._prepared_version == state.version:
+    def prepare_round(
+        self,
+        state: PartitionState,
+        *,
+        need_bad_cell_cache: bool = True,
+        need_merge_guidance: bool = True,
+    ) -> None:
+        if (
+            self._prepared_version == state.version
+            and (not need_bad_cell_cache or self._bad_cell_cache_ready)
+            and (not need_merge_guidance or self._merge_guidance_ready)
+        ):
             return
         start = time.perf_counter()
         self._emit_trace("sampler prepare_round start")
+        version_changed = self._prepared_version != state.version
         self._active_clusters = state.active_cluster_array()
         self._refresh_cluster_lookup()
         self._non_singletons = np.asarray(
@@ -284,7 +297,9 @@ class ProposalSampler:
             )
         else:
             self._non_singleton_probs = np.empty(0, dtype=np.float64)
-        full_neighbor_rebuild = self._prepared_version is None
+        full_neighbor_rebuild = (
+            self._prepared_version is None or not self._merge_guidance_ready
+        )
         if full_neighbor_rebuild:
             self._candidate_clusters_cache = {}
         else:
@@ -297,6 +312,8 @@ class ProposalSampler:
         if self.random_proposals:
             self._clear_guided_caches()
             self._prepared_version = state.version
+            self._bad_cell_cache_ready = False
+            self._merge_guidance_ready = False
             self._pending_signature_refresh.clear()
             self._pending_gene_refresh.clear()
             self._emit_trace(
@@ -311,14 +328,27 @@ class ProposalSampler:
                 f"active={self._active_clusters.size} non_singletons={self._non_singletons.size}",
             )
             return
-        self._refresh_bad_cell_cache(state)
+        if need_bad_cell_cache:
+            self._refresh_bad_cell_cache(state)
+            self._bad_cell_cache_ready = True
+        else:
+            self._bad_cell_candidates = {}
+            self._bad_cell_cache_ready = False
         t2 = time.perf_counter()
-        self._refresh_signature_pools(state)
-        t3 = time.perf_counter()
-        self._refresh_current_signatures(state)
-        t4 = time.perf_counter()
-        self._rebuild_merge_neighbors(state, full_rebuild=full_neighbor_rebuild)
-        t5 = time.perf_counter()
+        if need_merge_guidance:
+            self._refresh_signature_pools(state)
+            t3 = time.perf_counter()
+            self._refresh_current_signatures(state)
+            t4 = time.perf_counter()
+            self._rebuild_merge_neighbors(state, full_rebuild=full_neighbor_rebuild)
+            t5 = time.perf_counter()
+            self._merge_guidance_ready = True
+        else:
+            self._clear_merge_guidance_caches()
+            t3 = t2
+            t4 = t2
+            t5 = t2
+            self._merge_guidance_ready = False
         self._prepared_version = state.version
         self._pending_signature_refresh.clear()
         self._pending_gene_refresh.clear()
@@ -334,6 +364,11 @@ class ProposalSampler:
         )
 
     def _clear_guided_caches(self) -> None:
+        self._clear_merge_guidance_caches()
+        self._candidate_clusters_cache = {}
+        self._bad_cell_candidates = {}
+
+    def _clear_merge_guidance_caches(self) -> None:
         self._signature_pools = {}
         self._signature_genes = {}
         self._signature_weights = {}
@@ -343,8 +378,6 @@ class ProposalSampler:
         self._merge_neighbor_sources = np.empty(0, dtype=np.int64)
         self._merge_pair_scores = {}
         self._deterministic_merge_pairs = []
-        self._candidate_clusters_cache = {}
-        self._bad_cell_candidates = {}
 
     def _refresh_bad_cell_cache(self, state: PartitionState) -> None:
         active_non_singletons = set(
@@ -783,11 +816,38 @@ class ProposalSampler:
         if n_proposals <= 0:
             return []
         start = time.perf_counter()
-        self.prepare_round(state)
-        after_prepare = time.perf_counter()
         requested_proposals = int(n_proposals)
         draw_count = self._proposal_draw_count(requested_proposals)
         family_counts = self.rng.multinomial(draw_count, self.family_weights)
+        merge_backend_sampler = None
+        move_backend_sampler = None
+        if not self.random_proposals and backend is not None:
+            merge_backend_sampler = getattr(backend, "sample_guided_merge_pairs", None)
+            move_backend_sampler = getattr(
+                backend, "sample_guided_move_proposals", None
+            )
+        redirected_block_moves = 0
+        if move_backend_sampler is not None and int(family_counts[4]) > 0:
+            redirected_block_moves = int(family_counts[4])
+            family_counts[2] = int(family_counts[2]) + redirected_block_moves
+            family_counts[4] = 0
+        need_bad_cell_cache = not self.random_proposals and (
+            int(family_counts[1]) > 0
+            or int(family_counts[3]) > 0
+            or int(family_counts[4]) > 0
+            or (int(family_counts[2]) > 0 and move_backend_sampler is None)
+        )
+        need_merge_guidance = (
+            not self.random_proposals
+            and int(family_counts[0]) > 0
+            and merge_backend_sampler is None
+        )
+        self.prepare_round(
+            state,
+            need_bad_cell_cache=need_bad_cell_cache,
+            need_merge_guidance=need_merge_guidance,
+        )
+        after_prepare = time.perf_counter()
         proposals: list[Proposal] = []
         family_stats: dict[str, dict[str, float | int]] = {
             family_name: {"requested": 0, "produced": 0, "time_s": 0.0}
@@ -795,7 +855,7 @@ class ProposalSampler:
         }
 
         deterministic_budget = 0
-        if not self.random_proposals:
+        if not self.random_proposals and merge_backend_sampler is None:
             deterministic_budget = min(
                 len(self._deterministic_merge_pairs),
                 int(round(int(family_counts[0]) * self.deterministic_merge_ratio)),
@@ -807,10 +867,7 @@ class ProposalSampler:
             )
         )
         merge_requested = max(0, int(family_counts[0]) - deterministic_budget)
-        merge_backend_sampler = None
         merge_offloaded = False
-        if not self.random_proposals and backend is not None:
-            merge_backend_sampler = getattr(backend, "sample_guided_merge_pairs", None)
         if merge_backend_sampler is not None and merge_requested > 0:
             family_start = time.perf_counter()
             merge_props = merge_backend_sampler(
@@ -831,12 +888,7 @@ class ProposalSampler:
             family_stats["merge"]["time_s"] = float(family_elapsed)
             merge_offloaded = True
         move_requested = int(family_counts[2])
-        move_backend_sampler = None
         move_offloaded = False
-        if not self.random_proposals and backend is not None:
-            move_backend_sampler = getattr(
-                backend, "sample_guided_move_proposals", None
-            )
         if move_backend_sampler is not None and move_requested > 0:
             family_start = time.perf_counter()
             move_props = move_backend_sampler(
@@ -863,6 +915,7 @@ class ProposalSampler:
             f"merge={int(family_counts[0])} peel={int(family_counts[1])} move={int(family_counts[2])} "
             f"block_peel={int(family_counts[3])} block_move={int(family_counts[4])} "
             f"deterministic_merge={deterministic_budget} "
+            f"redirected_block_move={redirected_block_moves} "
             f"workers={self.proposal_workers}",
         )
 

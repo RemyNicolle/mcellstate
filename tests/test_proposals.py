@@ -309,6 +309,53 @@ def test_sample_batch_offloads_guided_move_family_to_backend():
     assert any(isinstance(proposal, MoveProposal) for proposal in proposals)
 
 
+def test_sample_batch_skips_cpu_guidance_rebuild_when_backend_offloads_hot_families():
+    synthetic = generate_synthetic_dataset(
+        n_clusters=3,
+        cells_per_cluster=4,
+        n_genes=12,
+        marker_strength=25.0,
+        seed=78,
+    )
+    state = PartitionState.from_csr(
+        synthetic.X,
+        init=np.asarray([0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5]),
+    )
+    sampler = ProposalSampler(
+        pi_merge=0.85,
+        pi_peel=0.0,
+        pi_move=0.10,
+        pi_block_peel=0.0,
+        pi_block_move=0.05,
+        proposal_workers=1,
+        seed=78,
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("CPU guided cache rebuild should be skipped")
+
+    sampler._refresh_bad_cell_cache = forbidden  # type: ignore[method-assign]
+    sampler._refresh_signature_pools = forbidden  # type: ignore[method-assign]
+    sampler._refresh_current_signatures = forbidden  # type: ignore[method-assign]
+    sampler._rebuild_merge_neighbors = forbidden  # type: ignore[method-assign]
+
+    class DummyBackend:
+        def sample_guided_merge_pairs(self, *args, **kwargs):
+            return [MergeProposal(0, 1)]
+
+        def sample_guided_move_proposals(self, *args, **kwargs):
+            return [
+                MoveProposal(cell=0, source_cluster=int(state.z[0]), target_cluster=1)
+            ]
+
+    proposals = sampler.sample_batch(state, 64, backend=DummyBackend())
+
+    assert proposals
+    assert any(isinstance(proposal, MergeProposal) for proposal in proposals)
+    assert any(isinstance(proposal, MoveProposal) for proposal in proposals)
+    assert all(not isinstance(proposal, BlockMoveProposal) for proposal in proposals)
+
+
 def test_block_move_family_sampling_uses_uniform_fast_path():
     synthetic = generate_synthetic_dataset(
         n_clusters=2,
