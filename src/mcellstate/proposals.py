@@ -773,7 +773,13 @@ class ProposalSampler:
         )
         self._deterministic_merge_pairs = [pair for pair, _ in ordered_pairs]
 
-    def sample_batch(self, state: PartitionState, n_proposals: int) -> list[Proposal]:
+    def sample_batch(
+        self,
+        state: PartitionState,
+        n_proposals: int,
+        *,
+        backend=None,
+    ) -> list[Proposal]:
         if n_proposals <= 0:
             return []
         start = time.perf_counter()
@@ -800,6 +806,56 @@ class ProposalSampler:
                 deterministic_budget, active_set=active_set
             )
         )
+        merge_requested = max(0, int(family_counts[0]) - deterministic_budget)
+        merge_backend_sampler = None
+        merge_offloaded = False
+        if not self.random_proposals and backend is not None:
+            merge_backend_sampler = getattr(backend, "sample_guided_merge_pairs", None)
+        if merge_backend_sampler is not None and merge_requested > 0:
+            family_start = time.perf_counter()
+            merge_props = merge_backend_sampler(
+                state,
+                merge_requested,
+                epsilon_uniform=self.merge_uniform_prob,
+                include_cached_pairs=False,
+                max_unique_pairs=merge_requested,
+                seed=int(self.rng.integers(np.iinfo(np.int64).max)),
+            )
+            proposals.extend(merge_props)
+            family_elapsed = time.perf_counter() - family_start
+            self._emit_trace(
+                f"sampler family=merge requested={merge_requested} produced={len(merge_props)} time_s={family_elapsed:.3f} backend=1",
+            )
+            family_stats["merge"]["requested"] = int(merge_requested)
+            family_stats["merge"]["produced"] = len(merge_props)
+            family_stats["merge"]["time_s"] = float(family_elapsed)
+            merge_offloaded = True
+        move_requested = int(family_counts[2])
+        move_backend_sampler = None
+        move_offloaded = False
+        if not self.random_proposals and backend is not None:
+            move_backend_sampler = getattr(
+                backend, "sample_guided_move_proposals", None
+            )
+        if move_backend_sampler is not None and move_requested > 0:
+            family_start = time.perf_counter()
+            move_props = move_backend_sampler(
+                state,
+                move_requested,
+                uniform_prob=self.move_uniform_prob,
+                limit=self.move_neighbor_limit,
+                max_unique_proposals=move_requested,
+                seed=int(self.rng.integers(np.iinfo(np.int64).max)),
+            )
+            proposals.extend(move_props)
+            family_elapsed = time.perf_counter() - family_start
+            self._emit_trace(
+                f"sampler family=move requested={move_requested} produced={len(move_props)} time_s={family_elapsed:.3f} backend=1",
+            )
+            family_stats["move"]["requested"] = int(move_requested)
+            family_stats["move"]["produced"] = len(move_props)
+            family_stats["move"]["time_s"] = float(family_elapsed)
+            move_offloaded = True
         self._emit_trace(
             "sampler sample_batch start "
             f"prepare_s={after_prepare - start:.3f} "
@@ -814,7 +870,9 @@ class ProposalSampler:
         for family_idx, family_name in enumerate(self.family_names):
             count = int(family_counts[family_idx])
             if family_name == "merge":
-                count = max(0, count - deterministic_budget)
+                count = 0 if merge_offloaded else max(0, count - deterministic_budget)
+            elif family_name == "move":
+                count = 0 if move_offloaded else count
             family_tasks.append((family_name, count))
         sub_tasks = self._expand_family_tasks(family_tasks)
         if self.proposal_workers > 1 and len(sub_tasks) > 1:

@@ -214,6 +214,101 @@ def test_random_sampler_caps_unique_proposals():
     assert all(isinstance(proposal, MergeProposal) for proposal in proposals)
 
 
+def test_sample_batch_offloads_guided_merge_family_to_backend():
+    synthetic = generate_synthetic_dataset(
+        n_clusters=3,
+        cells_per_cluster=4,
+        n_genes=12,
+        marker_strength=25.0,
+        seed=76,
+    )
+    state = PartitionState.from_csr(
+        synthetic.X,
+        init=np.asarray([0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5]),
+    )
+    sampler = ProposalSampler(
+        pi_merge=1.0,
+        pi_peel=0.0,
+        pi_move=0.0,
+        pi_block_peel=0.0,
+        pi_block_move=0.0,
+        deterministic_merge_ratio=0.0,
+        proposal_workers=1,
+        seed=76,
+    )
+
+    calls: list[tuple[int, float]] = []
+
+    class DummyBackend:
+        def sample_guided_merge_pairs(
+            self,
+            state_arg,
+            n_pairs,
+            *,
+            epsilon_uniform,
+            include_cached_pairs,
+            max_unique_pairs,
+            seed,
+        ):
+            del state_arg, include_cached_pairs, max_unique_pairs, seed
+            calls.append((int(n_pairs), float(epsilon_uniform)))
+            return [MergeProposal(0, 1)]
+
+    proposals = sampler.sample_batch(state, 8, backend=DummyBackend())
+
+    assert calls == [(8, sampler.merge_uniform_prob)]
+    assert proposals
+    assert any(isinstance(proposal, MergeProposal) for proposal in proposals)
+
+
+def test_sample_batch_offloads_guided_move_family_to_backend():
+    synthetic = generate_synthetic_dataset(
+        n_clusters=3,
+        cells_per_cluster=4,
+        n_genes=12,
+        marker_strength=25.0,
+        seed=77,
+    )
+    state = PartitionState.from_csr(
+        synthetic.X,
+        init=np.asarray([0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5]),
+    )
+    sampler = ProposalSampler(
+        pi_merge=0.0,
+        pi_peel=0.0,
+        pi_move=1.0,
+        pi_block_peel=0.0,
+        pi_block_move=0.0,
+        proposal_workers=1,
+        seed=77,
+    )
+
+    calls: list[tuple[int, float, int]] = []
+
+    class DummyBackend:
+        def sample_guided_move_proposals(
+            self,
+            state_arg,
+            n_proposals,
+            *,
+            uniform_prob,
+            limit,
+            max_unique_proposals,
+            seed,
+        ):
+            del state_arg, max_unique_proposals, seed
+            calls.append((int(n_proposals), float(uniform_prob), int(limit)))
+            return [
+                MoveProposal(cell=0, source_cluster=int(state.z[0]), target_cluster=1)
+            ]
+
+    proposals = sampler.sample_batch(state, 8, backend=DummyBackend())
+
+    assert calls == [(8, sampler.move_uniform_prob, sampler.move_neighbor_limit)]
+    assert proposals
+    assert any(isinstance(proposal, MoveProposal) for proposal in proposals)
+
+
 def test_block_move_family_sampling_uses_uniform_fast_path():
     synthetic = generate_synthetic_dataset(
         n_clusters=2,

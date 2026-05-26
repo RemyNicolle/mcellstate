@@ -644,6 +644,500 @@ class TorchDeviceBackend(CPUBackend):
                 )
         return proposals
 
+    def sample_guided_merge_pairs(
+        self,
+        state: PartitionState,
+        n_pairs: int,
+        *,
+        epsilon_uniform: float = 0.05,
+        include_cached_pairs: bool = True,
+        cached_pairs: list[tuple[int, int]] | None = None,
+        max_unique_pairs: int | None = None,
+        seed: int | None = None,
+    ) -> list[MergeProposal]:
+        n_pairs = max(0, int(n_pairs))
+        if n_pairs <= 0 or torch is None:
+            return []
+
+        self._sync_state_cache(state)
+        cache = self._state_cache
+        n_active = int(cache.active_cluster_count)
+        if n_active < 2:
+            return []
+
+        epsilon_uniform = max(0.0, min(1.0, float(epsilon_uniform)))
+        rng = np.random.default_rng(seed)
+        draw_seed = int(rng.integers(np.iinfo(np.int64).max))
+        generator = torch.Generator(device=str(self.device))
+        generator.manual_seed(draw_seed)
+
+        active_clusters = cache.active_cluster_ids_tensor[: cache.active_cluster_count]
+        active_lookup = cache.active_cluster_lookup_tensor
+        active_matrix = self.cluster_matrix.index_select(0, active_clusters)
+        presence = active_matrix > 0
+        proposals: dict[tuple[int, int], MergeProposal] = {}
+
+        if include_cached_pairs and cached_pairs:
+            cached_budget = min(len(cached_pairs), max(1, n_pairs // 4))
+            for cluster_a, cluster_b in cached_pairs[:cached_budget]:
+                cluster_a = int(cluster_a)
+                cluster_b = int(cluster_b)
+                if cluster_a == cluster_b:
+                    continue
+                if (
+                    cluster_a < 0
+                    or cluster_b < 0
+                    or cluster_a >= active_lookup.shape[0]
+                    or cluster_b >= active_lookup.shape[0]
+                ):
+                    continue
+                if (
+                    int(active_lookup[cluster_a].item()) < 0
+                    or int(active_lookup[cluster_b].item()) < 0
+                ):
+                    continue
+                pair = (min(cluster_a, cluster_b), max(cluster_a, cluster_b))
+                proposals.setdefault(
+                    pair, MergeProposal(cluster_a=pair[0], cluster_b=pair[1])
+                )
+                if len(proposals) >= n_pairs:
+                    return list(proposals.values())
+
+        member_counts = presence.sum(dim=0)
+        valid_gene_ids = torch.nonzero(member_counts >= 2, as_tuple=False).flatten()
+        gene_weights: torch.Tensor | None = None
+        if valid_gene_ids.numel() > 0:
+            counts = member_counts.index_select(0, valid_gene_ids).to(torch.float64)
+            pair_counts = counts * (counts - 1.0) * 0.5
+            idf = torch.log((float(n_active) + 1.0) / (counts + 1.0))
+            gene_weights = idf * pair_counts
+            positive = gene_weights > 0
+            valid_gene_ids = valid_gene_ids[positive]
+            gene_weights = gene_weights[positive]
+            if gene_weights.numel() > 0:
+                gene_weights = gene_weights / gene_weights.sum()
+            else:
+                gene_weights = None
+
+        block_size = 1024
+        attempts = 0
+        max_attempts = max(4, min(16, n_pairs))
+        while len(proposals) < n_pairs and attempts < max_attempts:
+            attempts += 1
+            remaining = n_pairs - len(proposals)
+            draw_count = max(remaining * 2, remaining + 32)
+
+            pair_batches: list[torch.Tensor] = []
+            if gene_weights is None:
+                uniform_count = draw_count
+                guided_count = 0
+            else:
+                uniform_mask = (
+                    torch.rand(draw_count, generator=generator, device=self.device)
+                    < epsilon_uniform
+                )
+                uniform_count = int(uniform_mask.sum().item())
+                guided_count = int(draw_count - uniform_count)
+
+            if uniform_count > 0:
+                first = torch.randint(
+                    n_active,
+                    (uniform_count,),
+                    generator=generator,
+                    device=self.device,
+                )
+                second = torch.randint(
+                    n_active - 1,
+                    (uniform_count,),
+                    generator=generator,
+                    device=self.device,
+                )
+                second = second + (second >= first).to(second.dtype)
+                uniform_a = torch.minimum(
+                    active_clusters[first], active_clusters[second]
+                )
+                uniform_b = torch.maximum(
+                    active_clusters[first], active_clusters[second]
+                )
+                pair_batches.append(torch.stack((uniform_a, uniform_b), dim=1))
+
+            if guided_count > 0 and gene_weights is not None:
+                sampled = torch.multinomial(
+                    gene_weights,
+                    num_samples=guided_count,
+                    replacement=True,
+                    generator=generator,
+                )
+                sampled_genes = valid_gene_ids.index_select(0, sampled)
+                guided_batches: list[torch.Tensor] = []
+                for start in range(0, guided_count, block_size):
+                    genes_block = sampled_genes[start : start + block_size]
+                    gene_presence = presence.index_select(1, genes_block)
+                    random_scores = torch.rand(
+                        gene_presence.shape,
+                        generator=generator,
+                        device=self.device,
+                    )
+                    random_scores = random_scores.masked_fill(~gene_presence, 2.0)
+                    chosen = torch.topk(
+                        random_scores,
+                        k=2,
+                        dim=0,
+                        largest=False,
+                    ).indices
+                    guided_a = active_clusters.index_select(0, chosen[0])
+                    guided_b = active_clusters.index_select(0, chosen[1])
+                    guided_batches.append(
+                        torch.stack(
+                            (
+                                torch.minimum(guided_a, guided_b),
+                                torch.maximum(guided_a, guided_b),
+                            ),
+                            dim=1,
+                        )
+                    )
+                if guided_batches:
+                    pair_batches.append(torch.cat(guided_batches, dim=0))
+
+            if not pair_batches:
+                break
+            merged = torch.cat(pair_batches, dim=0)
+            if merged.numel() == 0:
+                break
+            valid_pairs = merged[:, 0] != merged[:, 1]
+            merged = merged[valid_pairs]
+            if merged.numel() == 0:
+                continue
+            merged = torch.unique(merged, dim=0)
+
+            pair_cap = max_unique_pairs if max_unique_pairs is not None else remaining
+            pair_cap = max(1, int(pair_cap))
+            if merged.size(0) > pair_cap:
+                keep = torch.randperm(
+                    merged.size(0), generator=generator, device=self.device
+                )[:pair_cap]
+                merged = merged.index_select(0, keep)
+
+            for cluster_a, cluster_b in merged.to("cpu").tolist():
+                pair = (int(cluster_a), int(cluster_b))
+                proposals.setdefault(
+                    pair, MergeProposal(cluster_a=pair[0], cluster_b=pair[1])
+                )
+                if len(proposals) >= n_pairs:
+                    break
+
+        return list(proposals.values())[:n_pairs]
+
+    def _rank_targets_for_cells_chunk(
+        self,
+        state: PartitionState,
+        cell_ids: torch.Tensor,
+        *,
+        limit: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        self._sync_state_cache(state)
+        cache = self._state_cache
+        if cell_ids.numel() == 0:
+            empty = torch.empty((0,), dtype=torch.int64, device=self.device)
+            empty_2d = torch.empty((0, 0), dtype=torch.int64, device=self.device)
+            empty_mask = torch.empty((0, 0), dtype=torch.bool, device=self.device)
+            return empty, empty_2d, empty_mask
+
+        n_active = int(cache.active_cluster_count)
+        limit = min(max(1, int(limit)), max(1, n_active - 1))
+        active_clusters = cache.active_cluster_ids_tensor[: cache.active_cluster_count]
+        active_matrix = self.cluster_matrix.index_select(0, active_clusters)
+        member_counts = (active_matrix > 0).sum(dim=0)
+
+        source_cids = self.z_tensor[cell_ids]
+        starts = self.X_indptr_tensor[cell_ids]
+        ends = self.X_indptr_tensor[cell_ids + 1]
+        lengths = ends - starts
+        max_len = int(lengths.max().item()) if lengths.numel() else 0
+        if max_len == 0:
+            top_clusters = active_clusters.unsqueeze(0).expand(cell_ids.numel(), -1)
+            if top_clusters.size(1) > limit:
+                top_clusters = top_clusters[:, :limit]
+            valid = top_clusters != source_cids.unsqueeze(1)
+            return source_cids, top_clusters, valid
+
+        grid = torch.arange(max_len, device=self.device).expand(
+            cell_ids.numel(), max_len
+        )
+        mask = grid < lengths.unsqueeze(1)
+
+        index_tensor = starts.unsqueeze(1) + torch.arange(max_len, device=self.device)
+        clamped_indices = torch.where(
+            mask, index_tensor, torch.zeros_like(index_tensor)
+        )
+        genes_2d = torch.gather(
+            self.X_indices_tensor, 0, clamped_indices.view(-1)
+        ).view(cell_ids.numel(), max_len)
+        counts_2d = torch.gather(self.X_data_tensor, 0, clamped_indices.view(-1)).view(
+            cell_ids.numel(), max_len
+        )
+
+        genes_2d = torch.where(mask, genes_2d, torch.zeros_like(genes_2d))
+        counts_2d = torch.where(mask, counts_2d, torch.zeros_like(counts_2d))
+
+        idf_pad = torch.log(
+            (float(n_active) + 1.0)
+            / (
+                member_counts.index_select(0, genes_2d.view(-1)).view(
+                    cell_ids.numel(), max_len
+                )
+                + 1.0
+            )
+        )
+        idf_pad = torch.where(mask, idf_pad, torch.zeros_like(idf_pad))
+
+        target_counts = active_matrix.index_select(1, genes_2d.view(-1)).view(
+            n_active, cell_ids.numel(), max_len
+        )
+        target_counts = target_counts.permute(1, 0, 2).contiguous()
+
+        scores = torch.sum(
+            torch.minimum(counts_2d.unsqueeze(1), target_counts) * idf_pad.unsqueeze(1),
+            dim=2,
+        )
+        source_pos = self.active_cluster_lookup_tensor[source_cids]
+        scores[
+            torch.arange(cell_ids.numel(), device=self.device), source_pos
+        ] = -torch.inf
+
+        top_scores, top_idx = torch.topk(scores, k=limit, dim=1)
+        top_clusters = active_clusters.index_select(0, top_idx.view(-1)).view(
+            cell_ids.numel(), limit
+        )
+        valid = torch.isfinite(top_scores) & (top_clusters != source_cids.unsqueeze(1))
+        return source_cids, top_clusters, valid
+
+    def rank_target_clusters(
+        self,
+        state: PartitionState,
+        source_cluster: int,
+        genes: np.ndarray,
+        values: np.ndarray,
+        *,
+        limit: int | None = None,
+        candidate_targets: np.ndarray | None = None,
+    ) -> list[int]:
+        self._sync_state_cache(state)
+        cache = self._state_cache
+        n_active = int(cache.active_cluster_count)
+        if n_active < 2:
+            return []
+
+        genes = np.asarray(genes, dtype=np.int64)
+        values = np.asarray(values, dtype=np.float64)
+        if genes.size == 0 or values.size == 0:
+            return []
+
+        active_clusters = cache.active_cluster_ids_tensor[: cache.active_cluster_count]
+        if candidate_targets is not None and np.asarray(candidate_targets).size:
+            candidate_targets = np.asarray(candidate_targets, dtype=np.int64)
+            valid_targets = [
+                int(cluster_id)
+                for cluster_id in candidate_targets.tolist()
+                if 0 <= int(cluster_id) < cache.active_cluster_lookup_tensor.shape[0]
+                and int(cache.active_cluster_lookup_tensor[int(cluster_id)].item()) >= 0
+            ]
+            if not valid_targets:
+                return []
+            target_clusters = torch.tensor(
+                valid_targets, dtype=torch.int64, device=self.device
+            )
+        else:
+            target_clusters = active_clusters
+
+        target_clusters = target_clusters[target_clusters != int(source_cluster)]
+        if target_clusters.numel() == 0:
+            return []
+
+        active_matrix = self.cluster_matrix.index_select(0, active_clusters)
+        member_counts = (active_matrix > 0).sum(dim=0)
+        gene_tensor = torch.tensor(genes, dtype=torch.int64, device=self.device)
+        value_tensor = torch.tensor(values, dtype=torch.float64, device=self.device)
+        idf = torch.log(
+            (float(n_active) + 1.0) / (member_counts.index_select(0, gene_tensor) + 1.0)
+        )
+        target_matrix = self.cluster_matrix.index_select(0, target_clusters)
+        target_counts = target_matrix.index_select(1, gene_tensor)
+        scores = torch.sum(
+            torch.minimum(value_tensor.unsqueeze(0), target_counts) * idf.unsqueeze(0),
+            dim=1,
+        )
+        keep = torch.isfinite(scores)
+        if not torch.any(keep):
+            return []
+        target_clusters = target_clusters[keep]
+        scores = scores[keep]
+        if target_clusters.numel() == 0:
+            return []
+        order = torch.argsort(scores, descending=True, stable=True)
+        ranked = target_clusters.index_select(0, order)
+        if limit is not None and int(limit) > 0 and ranked.numel() > int(limit):
+            ranked = ranked[: int(limit)]
+        return [int(cluster_id) for cluster_id in ranked.to("cpu").tolist()]
+
+    def rank_targets_for_cells(
+        self,
+        state: PartitionState,
+        cell_ids: np.ndarray,
+        *,
+        limit: int,
+        uniform_targets: int = 0,
+        seed: int | None = None,
+    ) -> dict[int, list[int]]:
+        cell_ids = np.asarray(cell_ids, dtype=np.int64)
+        if cell_ids.size == 0:
+            return {}
+        self._sync_state_cache(state)
+        cache = self._state_cache
+        if int(cache.active_cluster_count) < 2:
+            return {}
+
+        rng = np.random.default_rng(seed)
+        active_clusters = cache.active_cluster_ids_tensor[: cache.active_cluster_count]
+        active_np = active_clusters.to("cpu").numpy()
+        chunk_size = min(max(32, int(self._cuda_min_chunk_size // 8)), cell_ids.size)
+        ranked: dict[int, list[int]] = {}
+        for start in range(0, cell_ids.size, chunk_size):
+            chunk_np = cell_ids[start : start + chunk_size]
+            chunk_tensor = torch.tensor(chunk_np, dtype=torch.int64, device=self.device)
+            source_cids, top_clusters, valid = self._rank_targets_for_cells_chunk(
+                state,
+                chunk_tensor,
+                limit=max(1, int(limit)),
+            )
+            source_np = source_cids.to("cpu").numpy()
+            top_np = top_clusters.to("cpu").numpy()
+            valid_np = valid.to("cpu").numpy()
+            for row, cell in enumerate(chunk_np.tolist()):
+                targets = [
+                    int(cluster_id)
+                    for cluster_id, keep in zip(
+                        top_np[row].tolist(), valid_np[row].tolist(), strict=True
+                    )
+                    if keep and int(cluster_id) != int(source_np[row])
+                ]
+                if uniform_targets > 0:
+                    uniform_pool = active_np[active_np != int(source_np[row])]
+                    if uniform_pool.size:
+                        take = min(int(uniform_targets), int(uniform_pool.size))
+                        extra = rng.choice(uniform_pool, size=take, replace=False)
+                        targets.extend(int(cluster_id) for cluster_id in extra.tolist())
+                deduped = [
+                    int(cluster_id)
+                    for cluster_id in dict.fromkeys(targets)
+                    if int(cluster_id) != int(source_np[row])
+                ]
+                if deduped:
+                    ranked[int(cell)] = deduped
+        return ranked
+
+    def sample_guided_move_proposals(
+        self,
+        state: PartitionState,
+        n_proposals: int,
+        *,
+        uniform_prob: float = 0.05,
+        limit: int = 16,
+        max_unique_proposals: int | None = None,
+        seed: int | None = None,
+    ) -> list[MoveProposal]:
+        n_proposals = max(0, int(n_proposals))
+        if n_proposals <= 0 or torch is None or state.n_cells <= 0:
+            return []
+
+        self._sync_state_cache(state)
+        cache = self._state_cache
+        if int(cache.active_cluster_count) < 2:
+            return []
+
+        uniform_prob = max(0.0, min(1.0, float(uniform_prob)))
+        rng = np.random.default_rng(seed)
+        draw_seed = int(rng.integers(np.iinfo(np.int64).max))
+        generator = torch.Generator(device=str(self.device))
+        generator.manual_seed(draw_seed)
+
+        active_clusters = cache.active_cluster_ids_tensor[: cache.active_cluster_count]
+        active_np = active_clusters.to("cpu").numpy()
+        draw_count = max(n_proposals * 2, n_proposals + 32)
+        cell_ids = torch.randint(
+            state.n_cells,
+            (draw_count,),
+            generator=generator,
+            device=self.device,
+        )
+        unique: dict[tuple[int, int, int], MoveProposal] = {}
+        rank_weights: dict[int, np.ndarray] = {}
+        chunk_size = min(max(32, int(self._cuda_min_chunk_size // 8)), draw_count)
+        for start in range(0, draw_count, chunk_size):
+            chunk = cell_ids[start : start + chunk_size]
+            source_cids, top_clusters, valid = self._rank_targets_for_cells_chunk(
+                state,
+                chunk,
+                limit=max(1, int(limit)),
+            )
+            chunk_cells = chunk.to("cpu").tolist()
+            source_np = source_cids.to("cpu").numpy()
+            top_np = top_clusters.to("cpu").numpy()
+            valid_np = valid.to("cpu").numpy()
+            for row, cell in enumerate(chunk_cells):
+                source_cluster = int(source_np[row])
+                target_cluster: int | None = None
+                ranked_targets = [
+                    int(cluster_id)
+                    for cluster_id, keep in zip(
+                        top_np[row].tolist(), valid_np[row].tolist(), strict=True
+                    )
+                    if keep and int(cluster_id) != source_cluster
+                ]
+                if ranked_targets and rng.random() >= uniform_prob:
+                    n_ranked = len(ranked_targets)
+                    weights = rank_weights.get(n_ranked)
+                    if weights is None:
+                        weights = np.linspace(
+                            float(n_ranked), 1.0, int(n_ranked), dtype=np.float64
+                        )
+                        weights = weights / float(weights.sum())
+                        rank_weights[n_ranked] = weights
+                    target_cluster = int(
+                        rng.choice(np.asarray(ranked_targets), p=weights)
+                    )
+                if target_cluster is None:
+                    uniform_pool = active_np[active_np != source_cluster]
+                    if uniform_pool.size:
+                        target_cluster = int(rng.choice(uniform_pool))
+                if target_cluster is None or target_cluster == source_cluster:
+                    continue
+                key = (int(cell), source_cluster, int(target_cluster))
+                unique.setdefault(
+                    key,
+                    MoveProposal(
+                        cell=int(cell),
+                        source_cluster=source_cluster,
+                        target_cluster=int(target_cluster),
+                    ),
+                )
+                if len(unique) >= n_proposals:
+                    break
+            if len(unique) >= n_proposals:
+                break
+
+        proposals = list(unique.values())
+        if (
+            max_unique_proposals is not None
+            and int(max_unique_proposals) > 0
+            and len(proposals) > int(max_unique_proposals)
+        ):
+            keep = rng.choice(
+                len(proposals), size=int(max_unique_proposals), replace=False
+            )
+            proposals = [proposals[int(idx)] for idx in keep.tolist()]
+        return proposals
+
     def select_nonconflicting_candidates(self, candidates: list[dict]) -> list[dict]:
         if not candidates:
             return []

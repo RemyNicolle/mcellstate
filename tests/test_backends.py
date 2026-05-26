@@ -193,6 +193,79 @@ def test_torch_backend_can_generate_random_proposals():
     )
 
 
+def test_torch_backend_can_generate_guided_merge_pairs():
+    synthetic = generate_synthetic_dataset(
+        n_clusters=3,
+        cells_per_cluster=4,
+        n_genes=12,
+        marker_strength=25.0,
+        seed=26,
+    )
+    state = PartitionState.from_csr(
+        synthetic.X,
+        init=np.asarray([0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5]),
+    )
+    psi = np.full(state.n_genes, 0.5, dtype=np.float64)
+    backend = TorchCPUBackend(psi, state, num_threads=2)
+
+    proposals = backend.sample_guided_merge_pairs(
+        state,
+        48,
+        epsilon_uniform=0.1,
+        max_unique_pairs=24,
+        seed=26,
+    )
+
+    active = set(int(cluster_id) for cluster_id in state.active_cluster_ids)
+    assert proposals
+    assert len(proposals) <= 48
+    seen: set[tuple[int, int]] = set()
+    for proposal in proposals:
+        assert isinstance(proposal, MergeProposal)
+        assert proposal.cluster_a in active
+        assert proposal.cluster_b in active
+        pair = (
+            min(int(proposal.cluster_a), int(proposal.cluster_b)),
+            max(int(proposal.cluster_a), int(proposal.cluster_b)),
+        )
+        assert pair not in seen
+        seen.add(pair)
+
+
+def test_torch_backend_can_generate_guided_move_proposals():
+    synthetic = generate_synthetic_dataset(
+        n_clusters=3,
+        cells_per_cluster=4,
+        n_genes=12,
+        marker_strength=25.0,
+        seed=27,
+    )
+    state = PartitionState.from_csr(
+        synthetic.X,
+        init=np.asarray([0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5]),
+    )
+    psi = np.full(state.n_genes, 0.5, dtype=np.float64)
+    backend = TorchCPUBackend(psi, state, num_threads=2)
+
+    proposals = backend.sample_guided_move_proposals(
+        state,
+        48,
+        uniform_prob=0.1,
+        limit=6,
+        max_unique_proposals=24,
+        seed=27,
+    )
+
+    assert proposals
+    assert len(proposals) <= 24
+    for proposal in proposals:
+        assert isinstance(proposal, MoveProposal)
+        assert int(proposal.source_cluster) in state.active_cluster_ids
+        assert int(proposal.target_cluster) in state.active_cluster_ids
+        assert int(proposal.source_cluster) != int(proposal.target_cluster)
+        assert int(state.z[int(proposal.cell)]) == int(proposal.source_cluster)
+
+
 def test_torch_backend_selects_nonconflicting_candidates_on_tensor_path():
     synthetic = generate_synthetic_dataset(
         n_clusters=3,

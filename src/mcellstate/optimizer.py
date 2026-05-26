@@ -1136,7 +1136,7 @@ class Optimizer:
                     seed=seed,
                 )
         self.sampler.prepare_round(state)
-        return self.sampler.sample_batch(state, count)
+        return self.sampler.sample_batch(state, count, backend=backend)
 
     def _sample_and_score_proposals(
         self, state: PartitionState, backend
@@ -1201,6 +1201,38 @@ class Optimizer:
             else np.empty(0, dtype=np.float64)
         )
         return proposals, scores, proposal_s, scoring_s, len(chunk_sizes)
+
+    def _rank_target_clusters(
+        self,
+        state: PartitionState,
+        backend,
+        source_cluster: int,
+        genes: np.ndarray,
+        values: np.ndarray,
+        *,
+        limit: int | None = None,
+        candidate_targets: np.ndarray | None = None,
+    ) -> list[int]:
+        backend_ranker = getattr(backend, "rank_target_clusters", None)
+        if backend_ranker is not None:
+            ranked = backend_ranker(
+                state,
+                int(source_cluster),
+                np.asarray(genes, dtype=np.int64),
+                np.asarray(values, dtype=np.float64),
+                limit=limit,
+                candidate_targets=candidate_targets,
+            )
+            if ranked:
+                return [int(cluster_id) for cluster_id in ranked]
+        return self.sampler.rank_target_clusters(
+            state,
+            int(source_cluster),
+            np.asarray(genes, dtype=np.int64),
+            np.asarray(values, dtype=np.float64),
+            limit=limit,
+            candidate_targets=candidate_targets,
+        )
 
     def _adapt_proposal_batch_size(
         self, *, chunk_count: int, proposal_s: float, scoring_s: float, backend
@@ -1778,10 +1810,27 @@ class Optimizer:
     def _build_merge_closure_candidates(
         self,
         state: PartitionState,
+        backend,
         *,
         n_pairs: int,
     ) -> list[Proposal]:
         if self.merge_closure_candidate_mode == "idf_shared_gene":
+            backend_sampler = getattr(backend, "sample_guided_merge_pairs", None)
+            if backend_sampler is not None:
+                cached_pairs = (
+                    self.sampler._deterministic_merge_pairs
+                    if self.sampler._prepared_version == state.version
+                    else None
+                )
+                return backend_sampler(
+                    state,
+                    n_pairs,
+                    epsilon_uniform=self.merge_closure_epsilon_uniform,
+                    include_cached_pairs=bool(cached_pairs),
+                    cached_pairs=cached_pairs,
+                    max_unique_pairs=n_pairs,
+                    seed=int(self.rng.integers(np.iinfo(np.int64).max)),
+                )
             return self.sampler.sample_guided_merge_pairs(
                 state,
                 n_pairs,
@@ -1813,10 +1862,13 @@ class Optimizer:
         operations: list[dict] = []
         batch_records: list[dict] = []
         stall_batches = 0
+        backend_merge_sampler = getattr(backend, "sample_guided_merge_pairs", None)
         for batch_idx in range(self.merge_closure_max_batches):
-            self.sampler.prepare_round(state)
+            if backend_merge_sampler is None:
+                self.sampler.prepare_round(state)
             proposals = self._build_merge_closure_candidates(
                 state,
+                backend,
                 n_pairs=self.merge_closure_pairs_per_batch,
             )
             if not proposals:
@@ -2092,6 +2144,18 @@ class Optimizer:
             exhaustive = (
                 len(state.active_cluster_ids) <= self.exhaustive_reassign_active_limit
             )
+            backend_ranker = getattr(backend, "rank_targets_for_cells", None)
+            ranked_by_cell = (
+                {}
+                if exhaustive or backend_ranker is None
+                else backend_ranker(
+                    state,
+                    cells,
+                    limit=self.batched_reassign_guided_targets,
+                    uniform_targets=self.batched_reassign_uniform_targets,
+                    seed=int(self.rng.integers(np.iinfo(np.int64).max)),
+                )
+            )
             for cell in cells.tolist():
                 cell = int(cell)
                 source_cluster = int(state.z[cell])
@@ -2104,6 +2168,8 @@ class Optimizer:
                         for cluster_id in state.active_cluster_array().tolist()
                         if int(cluster_id) != source_cluster
                     ]
+                elif cell in ranked_by_cell:
+                    targets = [int(target) for target in ranked_by_cell[cell]]
                 else:
                     candidate_targets = self.sampler._candidate_targets_for_payload(
                         state,
@@ -2111,8 +2177,9 @@ class Optimizer:
                         np.asarray(genes, dtype=np.int64),
                         np.asarray(values, dtype=np.int64),
                     )
-                    ranked_targets = self.sampler.rank_target_clusters(
+                    ranked_targets = self._rank_target_clusters(
                         state,
+                        backend,
                         source_cluster,
                         np.asarray(genes, dtype=np.int64),
                         np.asarray(values, dtype=np.int64),
@@ -2327,7 +2394,9 @@ class Optimizer:
         for _ in range(self.cluster_reassign_sweeps):
             self.sampler.prepare_round(state)
             proposals = self._build_cluster_reassignment_candidates(
-                state, max_sources=max_sources
+                state,
+                backend,
+                max_sources=max_sources,
             )
             if not proposals:
                 break
@@ -2358,6 +2427,7 @@ class Optimizer:
     def _build_cluster_reassignment_candidates(
         self,
         state: PartitionState,
+        backend,
         *,
         max_sources: int,
     ) -> list[Proposal]:
@@ -2377,8 +2447,9 @@ class Optimizer:
             genes, values = state.clusters[source_cluster].sorted_items()
             if genes.size:
                 order = np.argsort(values)[::-1][: self.sampler.signature_top_genes]
-                targets = self.sampler.rank_target_clusters(
+                targets = self._rank_target_clusters(
                     state,
+                    backend,
                     source_cluster,
                     genes[order],
                     values[order],
@@ -2539,7 +2610,11 @@ class Optimizer:
 
         for _ in range(self.serial_refine_passes):
             self.sampler.prepare_round(state)
-            candidates = self._build_refinement_candidates(state, focus_clusters)
+            candidates = self._build_refinement_candidates(
+                state,
+                backend,
+                focus_clusters,
+            )
             if not candidates:
                 break
             scores = backend.score_batch(state, candidates)
@@ -2566,6 +2641,7 @@ class Optimizer:
     def _build_refinement_candidates(
         self,
         state: PartitionState,
+        backend,
         focus_clusters: list[int],
     ) -> list[Proposal]:
         if not focus_clusters:
@@ -2603,8 +2679,9 @@ class Optimizer:
                     cell = int(cell)
                     proposals.append(PeelProposal(cell=cell, source_cluster=cluster_id))
                     genes, values = state.cell_counts(cell)
-                    for target_cluster in self.sampler.rank_target_clusters(
+                    for target_cluster in self._rank_target_clusters(
                         state,
+                        backend,
                         cluster_id,
                         genes,
                         values,
